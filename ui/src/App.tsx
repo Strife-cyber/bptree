@@ -21,11 +21,11 @@ interface TreeNodeProps {
   node: BTreeNode;
   treeType: 'bplus' | 'bminus';
   highlightedNodes: Set<number>;
-  searchKey: number | null;
+  searchTargetKey: { nodeId: number, keyIndex: number } | null;
   searchStep: number;
 }
 
-const TreeNode = ({ node, treeType, highlightedNodes, searchKey, searchStep }: TreeNodeProps) => {
+const TreeNode = ({ node, treeType, highlightedNodes, searchTargetKey, searchStep }: TreeNodeProps) => {
   const isHighlighted = highlightedNodes.has(node.id);
   const isCurrentSearch = searchStep === node.id;
 
@@ -49,18 +49,20 @@ const TreeNode = ({ node, treeType, highlightedNodes, searchKey, searchStep }: T
            className={`node-box ${node.type} ${isHighlighted ? 'highlighted' : ''} ${isCurrentSearch ? 'search-current' : ''}`}
         >
           <div className="node-id">Page {node.id}</div>
-          {node.keys.map((key, i) => (
+          {node.keys.map((key, i) => {
+            const isComparing = searchTargetKey?.nodeId === node.id && searchTargetKey.keyIndex === i;
+            return (
             <motion.div
               layout
               key={`${node.id}-${key}`}
-              className={`kv-pair ${searchKey !== null && key === searchKey ? 'search-target' : ''}`}
+              className={`kv-pair ${isComparing ? 'search-target' : ''}`}
             >
               <div className="k-top">{key}</div>
               {((treeType === 'bplus' && node.type === 'leaf') || treeType === 'bminus') && node.values && node.values[i] && (
                 <div className="v-bottom">{node.values[i]}</div>
               )}
             </motion.div>
-          ))}
+          )})}
           {treeType === 'bplus' && node.type === 'leaf' && node.next !== null && node.next !== undefined && (
              <div className="next-ptr">→ P{node.next}</div>
           )}
@@ -76,7 +78,7 @@ const TreeNode = ({ node, treeType, highlightedNodes, searchKey, searchStep }: T
                 node={child}
                 treeType={treeType}
                 highlightedNodes={highlightedNodes}
-                searchKey={searchKey}
+                searchTargetKey={searchTargetKey}
                 searchStep={searchStep}
               />
             ))}
@@ -105,11 +107,20 @@ export default function App() {
   const [loading, setLoading] = useState(false);
 
   const [highlightedNodes, setHighlightedNodes] = useState<Set<number>>(new Set());
-  const [searchTargetKey, setSearchTargetKey] = useState<number | null>(null);
+  const [searchTargetKey, setSearchTargetKey] = useState<{ nodeId: number, keyIndex: number } | null>(null);
   const [searchCurrentStep, setSearchCurrentStep] = useState<number>(-1);
   const [isSearching, setIsSearching] = useState(false);
   const [searchSpeed, setSearchSpeed] = useState(1000);
   const [isPaused, setIsPaused] = useState(false);
+  
+  const isSearchingRef = useRef(false);
+  const isPausedRef = useRef(false);
+  const speedRef = useRef(1000);
+  
+  // Sync speed to ref
+  useEffect(() => {
+    speedRef.current = searchSpeed;
+  }, [searchSpeed]);
   
   const [treeDegree, setTreeDegree] = useState(3);
 
@@ -218,9 +229,12 @@ export default function App() {
     if (!searchKey || isSearching) return;
 
     const key = parseInt(searchKey);
-    setSearchTargetKey(key);
     setIsSearching(true);
     setIsPaused(false);
+    isSearchingRef.current = true;
+    isPausedRef.current = false;
+    
+    setSearchTargetKey(null);
     setHighlightedNodes(new Set());
     setSearchCurrentStep(-1);
 
@@ -232,24 +246,56 @@ export default function App() {
         body: JSON.stringify({ key })
       });
       const data = await res.json();
-      const path: Array<{id: number, found: boolean}> = data.path;
+      const path: Array<{id: number, found: boolean, keys: number[]}> = data.path;
 
       for (let i = 0; i < path.length; i++) {
-        if (!isSearching) break;
-        while (isPaused && isSearching) {
+        if (!isSearchingRef.current) break;
+        while (isPausedRef.current && isSearchingRef.current) {
           await new Promise(r => setTimeout(r, 100));
         }
+        
         const node = path[i];
         setSearchCurrentStep(node.id);
         setHighlightedNodes(prev => new Set([...prev, node.id]));
-        await new Promise(r => setTimeout(r, searchSpeed));
+        await new Promise(r => setTimeout(r, speedRef.current));
+        
+        let matched = false;
+        for (let j = 0; j < node.keys.length; j++) {
+           if (!isSearchingRef.current) break;
+           while (isPausedRef.current && isSearchingRef.current) {
+             await new Promise(r => setTimeout(r, 100));
+           }
+           
+           setSearchTargetKey({ nodeId: node.id, keyIndex: j });
+           await new Promise(r => setTimeout(r, speedRef.current));
+           
+           if (key === node.keys[j]) {
+              matched = true;
+              break;
+           }
+           if (key < node.keys[j]) {
+              break;
+           }
+        }
+        
+        if (matched && node.found) {
+            // Found it permanently
+            break;
+        } else {
+            setSearchTargetKey(null);
+        }
+        
+        if (i < path.length - 1) {
+           await new Promise(r => setTimeout(r, speedRef.current));
+        }
       }
 
-      await new Promise(r => setTimeout(r, searchSpeed));
+      await new Promise(r => setTimeout(r, speedRef.current));
     } catch (e) {
       console.error('Failed to search', e);
     } finally {
       setIsSearching(false);
+      isSearchingRef.current = false;
       setSearchCurrentStep(-1);
     }
   };
@@ -257,9 +303,18 @@ export default function App() {
   const cancelSearch = () => {
     setIsSearching(false);
     setIsPaused(false);
+    isSearchingRef.current = false;
+    isPausedRef.current = false;
     setSearchCurrentStep(-1);
     setHighlightedNodes(new Set());
     setSearchTargetKey(null);
+  };
+
+  const togglePause = () => {
+     setIsPaused(p => {
+        isPausedRef.current = !p;
+        return !p;
+     });
   };
 
   const handleDelete = async (e: React.FormEvent) => {
@@ -416,7 +471,12 @@ export default function App() {
             <div className="input-group">
               <input type="number" placeholder="Search key..." value={searchKey} onChange={(e) => setSearchKey(e.target.value)} disabled={isSearching} />
               {isSearching ? (
-                <button type="button" onClick={cancelSearch} className={"icon-btn danger"}><X size={18} /></button>
+                <>
+                  <button type="button" onClick={cancelSearch} className={"icon-btn danger"} title="Cancel Search"><X size={18} /></button>
+                  <button type="button" onClick={togglePause} className={"icon-btn"} style={{ background: 'rgba(255,255,255,0.1)' }} title={isPaused ? "Resume" : "Pause"}>
+                     {isPaused ? <Target size={18} /> : <Pause size={18} />}
+                  </button>
+                </>
               ) : (
                 <button type="submit" disabled={!searchKey || isSearching} className={"icon-btn primary"}><Search size={18} /></button>
               )}
@@ -512,14 +572,14 @@ export default function App() {
           <button onClick={resetView} className="zoom-btn" title="Fit to Screen"><Maximize size={20} /></button>
         </div>
 
-        <TransformWrapper ref={transformRef} initialScale={1} minScale={0.2} maxScale={3} centerOnInit={true}>
+        <TransformWrapper ref={transformRef} initialScale={1} minScale={0.05} maxScale={3} centerOnInit={true} limitToBounds={false}>
           {() => (
             <TransformComponent wrapperClass="transform-wrapper" contentClass="transform-content">
               <div className="canvas-container">
                 <div className="tree">
                   {currentTree ? (
                     <ul>
-                      <TreeNode node={currentTree} treeType={treeType} highlightedNodes={highlightedNodes} searchKey={searchTargetKey} searchStep={searchCurrentStep} />
+                      <TreeNode node={currentTree} treeType={treeType} highlightedNodes={highlightedNodes} searchTargetKey={searchTargetKey} searchStep={searchCurrentStep} />
                     </ul>
                   ) : (
                     <div style={{ color: 'var(--text-secondary)', marginTop: '4rem' }}>Awaiting Disk Initialization...</div>

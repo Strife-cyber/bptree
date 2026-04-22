@@ -119,15 +119,40 @@ impl BTree {
     pub fn delete(&mut self, key: u64) {
         let root = self.get_node(self.root_id);
         self.delete_from_node(root, key);
+        
+        let mut root = self.get_node(self.root_id);
+        match &root.node_type {
+            NodeType::Internal(internal) => {
+                if internal.keys.is_empty() {
+                    self.root_id = internal.children[0];
+                    let mut new_root = self.get_node(self.root_id);
+                    new_root.parent = None;
+                    self.save_node(&new_root);
+                    self.save_meta();
+                }
+            }
+            _ => {}
+        }
     }
 
     fn delete_from_node(&mut self, mut node: Node, key: u64) {
         match &mut node.node_type {
             NodeType::Leaf(leaf) => {
                 if let Ok(pos) = leaf.keys.binary_search(&key) {
+                    let old_first_key = leaf.keys[0];
                     leaf.keys.remove(pos);
                     leaf.values.remove(pos);
+                    
+                    let mut new_first_key = None;
+                    if pos == 0 && !leaf.keys.is_empty() {
+                        new_first_key = Some(leaf.keys[0]);
+                    }
+                    
                     self.save_node(&node);
+                    
+                    if let Some(nfk) = new_first_key {
+                        self.replace_routing_key(node.id, old_first_key, nfk);
+                    }
                 }
             }
             NodeType::Internal(internal) => {
@@ -138,6 +163,217 @@ impl BTree {
                 let child_id = internal.children[pos];
                 let child = self.get_node(child_id);
                 self.delete_from_node(child, key);
+            }
+        }
+        
+        let node = self.get_node(node.id);
+        if let Some(parent_id) = node.parent {
+            let min_keys = self.max_keys / 2;
+            let len = match &node.node_type {
+                NodeType::Leaf(leaf) => leaf.keys.len(),
+                NodeType::Internal(internal) => internal.keys.len(),
+            };
+            if len < min_keys {
+                self.rebalance(parent_id, node.id);
+            }
+        }
+    }
+    
+    fn replace_routing_key(&mut self, mut node_id: u32, old_key: u64, new_key: u64) {
+        while let Some(parent_id) = self.get_node(node_id).parent {
+            let mut parent = self.get_node(parent_id);
+            if let NodeType::Internal(internal) = &mut parent.node_type {
+                if let Some(pos) = internal.keys.iter().position(|&k| k == old_key) {
+                    internal.keys[pos] = new_key;
+                    self.save_node(&parent);
+                    return;
+                }
+            }
+            node_id = parent_id;
+        }
+    }
+
+    fn rebalance(&mut self, parent_id: u32, child_id: u32) {
+        let mut parent = self.get_node(parent_id);
+        let pos = match &parent.node_type {
+            NodeType::Internal(internal) => internal.children.iter().position(|&id| id == child_id).unwrap(),
+            _ => unreachable!(),
+        };
+        
+        let min_keys = self.max_keys / 2;
+        let is_leaf = self.get_node(child_id).is_leaf();
+        
+        if is_leaf {
+            if pos > 0 {
+                let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+                let mut left_sibling = self.get_node(p_internal.children[pos - 1]);
+                let l_len = match &left_sibling.node_type { NodeType::Leaf(l) => l.keys.len(), _ => unreachable!() };
+                if l_len > min_keys {
+                    let mut child = self.get_node(child_id);
+                    if let (NodeType::Leaf(left_l), NodeType::Leaf(child_l)) = (&mut left_sibling.node_type, &mut child.node_type) {
+                        let borrow_k = left_l.keys.pop().unwrap();
+                        let borrow_v = left_l.values.pop().unwrap();
+                        child_l.keys.insert(0, borrow_k);
+                        child_l.values.insert(0, borrow_v);
+                        p_internal.keys[pos - 1] = borrow_k;
+                    }
+                    self.save_node(&left_sibling);
+                    self.save_node(&child);
+                    self.save_node(&parent);
+                    return;
+                }
+            }
+            if pos < match &parent.node_type { NodeType::Internal(i) => i.children.len() - 1, _ => 0 } {
+                let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+                let mut right_sibling = self.get_node(p_internal.children[pos + 1]);
+                let r_len = match &right_sibling.node_type { NodeType::Leaf(l) => l.keys.len(), _ => unreachable!() };
+                if r_len > min_keys {
+                    let mut child = self.get_node(child_id);
+                    if let (NodeType::Leaf(right_l), NodeType::Leaf(child_l)) = (&mut right_sibling.node_type, &mut child.node_type) {
+                        let borrow_k = right_l.keys.remove(0);
+                        let borrow_v = right_l.values.remove(0);
+                        child_l.keys.push(borrow_k);
+                        child_l.values.push(borrow_v);
+                        p_internal.keys[pos] = right_l.keys[0];
+                    }
+                    self.save_node(&right_sibling);
+                    self.save_node(&child);
+                    self.save_node(&parent);
+                    return;
+                }
+            }
+            if pos > 0 {
+                let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+                let mut left_sibling = self.get_node(p_internal.children[pos - 1]);
+                let mut child = self.get_node(child_id);
+                p_internal.keys.remove(pos - 1);
+                p_internal.children.remove(pos);
+                if let (NodeType::Leaf(left_l), NodeType::Leaf(child_l)) = (&mut left_sibling.node_type, &mut child.node_type) {
+                    left_l.keys.append(&mut child_l.keys);
+                    left_l.values.append(&mut child_l.values);
+                    left_l.next_leaf = child_l.next_leaf;
+                }
+                self.save_node(&left_sibling);
+                self.save_node(&parent);
+                if let Some(gp_id) = parent.parent {
+                    if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
+                        self.rebalance(gp_id, parent.id);
+                    }
+                }
+            } else {
+                let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+                let mut right_sibling = self.get_node(p_internal.children[pos + 1]);
+                let mut child = self.get_node(child_id);
+                p_internal.keys.remove(pos);
+                p_internal.children.remove(pos + 1);
+                if let (NodeType::Leaf(child_l), NodeType::Leaf(right_l)) = (&mut child.node_type, &mut right_sibling.node_type) {
+                    child_l.keys.append(&mut right_l.keys);
+                    child_l.values.append(&mut right_l.values);
+                    child_l.next_leaf = right_l.next_leaf;
+                }
+                self.save_node(&child);
+                self.save_node(&parent);
+                if let Some(gp_id) = parent.parent {
+                    if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
+                        self.rebalance(gp_id, parent.id);
+                    }
+                }
+            }
+        } else {
+            if pos > 0 {
+                let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+                let mut left_sibling = self.get_node(p_internal.children[pos - 1]);
+                let l_len = match &left_sibling.node_type { NodeType::Internal(i) => i.keys.len(), _ => unreachable!() };
+                if l_len > min_keys {
+                    let mut child = self.get_node(child_id);
+                    if let (NodeType::Internal(left_i), NodeType::Internal(child_i)) = (&mut left_sibling.node_type, &mut child.node_type) {
+                        let borrow_k = left_i.keys.pop().unwrap();
+                        let borrow_c = left_i.children.pop().unwrap();
+                        let parent_k = p_internal.keys[pos - 1];
+                        p_internal.keys[pos - 1] = borrow_k;
+                        child_i.keys.insert(0, parent_k);
+                        child_i.children.insert(0, borrow_c);
+                        
+                        let mut bc_node = self.get_node(borrow_c);
+                        bc_node.parent = Some(child.id);
+                        self.save_node(&bc_node);
+                    }
+                    self.save_node(&left_sibling);
+                    self.save_node(&child);
+                    self.save_node(&parent);
+                    return;
+                }
+            }
+            if pos < match &parent.node_type { NodeType::Internal(i) => i.children.len() - 1, _ => 0 } {
+                let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+                let mut right_sibling = self.get_node(p_internal.children[pos + 1]);
+                let r_len = match &right_sibling.node_type { NodeType::Internal(i) => i.keys.len(), _ => unreachable!() };
+                if r_len > min_keys {
+                    let mut child = self.get_node(child_id);
+                    if let (NodeType::Internal(right_i), NodeType::Internal(child_i)) = (&mut right_sibling.node_type, &mut child.node_type) {
+                        let borrow_k = right_i.keys.remove(0);
+                        let borrow_c = right_i.children.remove(0);
+                        let parent_k = p_internal.keys[pos];
+                        p_internal.keys[pos] = borrow_k;
+                        child_i.keys.push(parent_k);
+                        child_i.children.push(borrow_c);
+                        
+                        let mut bc_node = self.get_node(borrow_c);
+                        bc_node.parent = Some(child.id);
+                        self.save_node(&bc_node);
+                    }
+                    self.save_node(&right_sibling);
+                    self.save_node(&child);
+                    self.save_node(&parent);
+                    return;
+                }
+            }
+            if pos > 0 {
+                let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+                let mut left_sibling = self.get_node(p_internal.children[pos - 1]);
+                let mut child = self.get_node(child_id);
+                let parent_k = p_internal.keys.remove(pos - 1);
+                p_internal.children.remove(pos);
+                if let (NodeType::Internal(left_i), NodeType::Internal(child_i)) = (&mut left_sibling.node_type, &mut child.node_type) {
+                    left_i.keys.push(parent_k);
+                    left_i.keys.append(&mut child_i.keys);
+                    left_i.children.append(&mut child_i.children);
+                    for &c in &left_i.children {
+                        let mut cn = self.get_node(c);
+                        cn.parent = Some(left_sibling.id);
+                        self.save_node(&cn);
+                    }
+                }
+                self.save_node(&left_sibling);
+                self.save_node(&parent);
+                if let Some(gp_id) = parent.parent {
+                    if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
+                        self.rebalance(gp_id, parent.id);
+                    }
+                }
+            } else {
+                let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+                let mut right_sibling = self.get_node(p_internal.children[pos + 1]);
+                let mut child = self.get_node(child_id);
+                let parent_k = p_internal.keys.remove(pos);
+                p_internal.children.remove(pos + 1);
+                if let (NodeType::Internal(child_i), NodeType::Internal(right_i)) = (&mut child.node_type, &mut right_sibling.node_type) {
+                    child_i.keys.push(parent_k);
+                    child_i.keys.append(&mut right_i.keys);
+                    child_i.children.append(&mut right_i.children);
+                    for &c in &child_i.children {
+                        let mut cn = self.get_node(c);
+                        cn.parent = Some(child.id);
+                        self.save_node(&cn);
+                    }
+                }
+                self.save_node(&child);
+                self.save_node(&parent);
+                if let Some(gp_id) = parent.parent {
+                    if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
+                        self.rebalance(gp_id, parent.id);
+                    }
+                }
             }
         }
     }

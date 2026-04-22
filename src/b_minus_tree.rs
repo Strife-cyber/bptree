@@ -115,26 +115,25 @@ impl BMinusTree {
     pub fn delete(&mut self, key: u64) {
         let root = self.get_node(self.root_id);
         self.delete_from_node(root, key);
+        
+        let mut root = self.get_node(self.root_id);
+        if root.keys.is_empty() && !root.is_leaf() {
+            self.root_id = root.children[0];
+            let mut new_root = self.get_node(self.root_id);
+            new_root.parent = None;
+            self.save_node(&new_root);
+            self.save_meta();
+        }
     }
 
     fn delete_from_node(&mut self, mut node: BNode, key: u64) {
         match node.keys.binary_search(&key) {
             Ok(pos) => {
-                // Key found here!
                 if node.is_leaf() {
                     node.keys.remove(pos);
                     node.values.remove(pos);
                     self.save_node(&node);
                 } else {
-                    // Standard B-Tree deletion from internal node means finding
-                    // the predecessor/successor. To keep it visually simple for lazy delete:
-                    // we pull the predecessor up.
-                    // Wait, pulling predecessor up involves traversal. 
-                    // Let's just remove the key and its right side child for an ultra lazy visual delete
-                    // Wait, removing a child destroys that entire subtree branch! We CANNOT remove the child.
-                    // We must find a leaf replacement.
-                    // But actually, the user just wants to see keys delete. We can swap it with predecessor.
-                    
                     let mut pred = self.get_node(node.children[pos]);
                     while !pred.is_leaf() {
                         pred = self.get_node(*pred.children.last().unwrap());
@@ -147,7 +146,6 @@ impl BMinusTree {
                     node.values[pos] = pred_val;
                     self.save_node(&node);
                     
-                    // Now delete the predecessor from that left child
                     let left_child = self.get_node(node.children[pos]);
                     self.delete_from_node(left_child, pred_key);
                 }
@@ -156,6 +154,150 @@ impl BMinusTree {
                 if !node.is_leaf() {
                     let child = self.get_node(node.children[pos]);
                     self.delete_from_node(child, key);
+                }
+            }
+        }
+        
+        let node = self.get_node(node.id);
+        if let Some(parent_id) = node.parent {
+            let min_keys = self.max_keys / 2;
+            if node.keys.len() < min_keys {
+                self.rebalance(parent_id, node.id);
+            }
+        }
+    }
+    
+    fn rebalance(&mut self, parent_id: u32, child_id: u32) {
+        let mut parent = self.get_node(parent_id);
+        let pos = parent.children.iter().position(|&id| id == child_id).unwrap();
+        
+        let min_keys = self.max_keys / 2;
+        
+        // Try borrow left
+        if pos > 0 {
+            let mut left_sibling = self.get_node(parent.children[pos - 1]);
+            if left_sibling.keys.len() > min_keys {
+                let mut child = self.get_node(child_id);
+                
+                let borrow_k = left_sibling.keys.pop().unwrap();
+                let borrow_v = left_sibling.values.pop().unwrap();
+                let parent_k = parent.keys[pos - 1];
+                let parent_v = parent.values[pos - 1].clone();
+                
+                parent.keys[pos - 1] = borrow_k;
+                parent.values[pos - 1] = borrow_v;
+                
+                child.keys.insert(0, parent_k);
+                child.values.insert(0, parent_v);
+                
+                if !left_sibling.is_leaf() {
+                    let borrow_c = left_sibling.children.pop().unwrap();
+                    let mut bc_node = self.get_node(borrow_c);
+                    bc_node.parent = Some(child.id);
+                    self.save_node(&bc_node);
+                    child.children.insert(0, borrow_c);
+                }
+                
+                self.save_node(&left_sibling);
+                self.save_node(&child);
+                self.save_node(&parent);
+                return;
+            }
+        }
+        
+        // Try borrow right
+        if pos < parent.children.len() - 1 {
+            let mut right_sibling = self.get_node(parent.children[pos + 1]);
+            if right_sibling.keys.len() > min_keys {
+                let mut child = self.get_node(child_id);
+                
+                let borrow_k = right_sibling.keys.remove(0);
+                let borrow_v = right_sibling.values.remove(0);
+                let parent_k = parent.keys[pos];
+                let parent_v = parent.values[pos].clone();
+                
+                parent.keys[pos] = borrow_k;
+                parent.values[pos] = borrow_v;
+                
+                child.keys.push(parent_k);
+                child.values.push(parent_v);
+                
+                if !right_sibling.is_leaf() {
+                    let borrow_c = right_sibling.children.remove(0);
+                    let mut bc_node = self.get_node(borrow_c);
+                    bc_node.parent = Some(child.id);
+                    self.save_node(&bc_node);
+                    child.children.push(borrow_c);
+                }
+                
+                self.save_node(&right_sibling);
+                self.save_node(&child);
+                self.save_node(&parent);
+                return;
+            }
+        }
+        
+        // Merge
+        if pos > 0 {
+            let mut left_sibling = self.get_node(parent.children[pos - 1]);
+            let mut child = self.get_node(child_id);
+            
+            let parent_k = parent.keys.remove(pos - 1);
+            let parent_v = parent.values.remove(pos - 1);
+            parent.children.remove(pos);
+            
+            left_sibling.keys.push(parent_k);
+            left_sibling.values.push(parent_v);
+            
+            left_sibling.keys.append(&mut child.keys);
+            left_sibling.values.append(&mut child.values);
+            
+            if !child.is_leaf() {
+                for &c_id in &child.children {
+                    let mut c_node = self.get_node(c_id);
+                    c_node.parent = Some(left_sibling.id);
+                    self.save_node(&c_node);
+                }
+                left_sibling.children.append(&mut child.children);
+            }
+            
+            self.save_node(&left_sibling);
+            self.save_node(&parent);
+            
+            if let Some(gp_id) = parent.parent {
+                if parent.keys.len() < min_keys {
+                    self.rebalance(gp_id, parent.id);
+                }
+            }
+        } else {
+            let mut right_sibling = self.get_node(parent.children[pos + 1]);
+            let mut child = self.get_node(child_id);
+            
+            let parent_k = parent.keys.remove(pos);
+            let parent_v = parent.values.remove(pos);
+            parent.children.remove(pos + 1);
+            
+            child.keys.push(parent_k);
+            child.values.push(parent_v);
+            
+            child.keys.append(&mut right_sibling.keys);
+            child.values.append(&mut right_sibling.values);
+            
+            if !right_sibling.is_leaf() {
+                for &c_id in &right_sibling.children {
+                    let mut c_node = self.get_node(c_id);
+                    c_node.parent = Some(child.id);
+                    self.save_node(&c_node);
+                }
+                child.children.append(&mut right_sibling.children);
+            }
+            
+            self.save_node(&child);
+            self.save_node(&parent);
+            
+            if let Some(gp_id) = parent.parent {
+                if parent.keys.len() < min_keys {
+                    self.rebalance(gp_id, parent.id);
                 }
             }
         }
