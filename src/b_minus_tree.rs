@@ -6,39 +6,54 @@ use crate::b_minus_node::BNode;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BMinusMetaPage {
     pub root_id: u32,
+    pub max_keys: usize,
 }
 
 pub struct BMinusTree {
     pub pager: Arc<Mutex<Pager>>,
     pub root_id: u32,
+    pub max_keys: usize,
 }
 
 impl BMinusTree {
-    pub fn new(pager: Arc<Mutex<Pager>>) -> Self {
+    pub fn new(pager: Arc<Mutex<Pager>>, max_keys: usize) -> Self {
         let mut p = pager.lock().unwrap();
         
-        // Let's reserve page 1 for the BMinusTree meta page (Page 0 is B+ Tree meta page)
-        // Actually, this is sharing a single Pager (file db). B+ tree and B- tree in the same file!
-        // To not conflict, let's use a separate file for B- tree. The caller will pass a dedicated pager.
         if p.num_pages == 1 {
             let root_id = p.allocate_page();
             let root_node = BNode::new(root_id);
             p.write_page(root_id, &root_node.serialize()).unwrap();
             
-            let meta = BMinusMetaPage { root_id };
+            let meta = BMinusMetaPage { root_id, max_keys };
             let meta_bytes = bincode::serialize(&meta).unwrap();
             p.write_page(0, &meta_bytes).unwrap();
             
             drop(p);
-            return Self { pager, root_id };
+            return Self { pager, root_id, max_keys };
         }
         
         let meta_bytes = p.read_page(0).unwrap();
         let meta: BMinusMetaPage = bincode::deserialize(&meta_bytes).unwrap();
         let root_id = meta.root_id;
+        let db_max_keys = meta.max_keys;
         drop(p);
         
-        Self { pager, root_id }
+        Self { pager, root_id, max_keys: db_max_keys }
+    }
+
+    pub fn reset(&mut self, max_keys: usize) {
+        let mut p = self.pager.lock().unwrap();
+        p.reset().unwrap();
+        self.max_keys = max_keys;
+        
+        let root_id = p.allocate_page();
+        let root_node = BNode::new(root_id);
+        p.write_page(root_id, &root_node.serialize()).unwrap();
+        
+        let meta = BMinusMetaPage { root_id, max_keys };
+        let meta_bytes = bincode::serialize(&meta).unwrap();
+        p.write_page(0, &meta_bytes).unwrap();
+        self.root_id = root_id;
     }
 
     pub fn get_node(&self, id: u32) -> BNode {
@@ -53,7 +68,7 @@ impl BMinusTree {
     }
 
     fn save_meta(&mut self) {
-        let meta = BMinusMetaPage { root_id: self.root_id };
+        let meta = BMinusMetaPage { root_id: self.root_id, max_keys: self.max_keys };
         let meta_bytes = bincode::serialize(&meta).unwrap();
         let mut p = self.pager.lock().unwrap();
         p.write_page(0, &meta_bytes).unwrap();
@@ -77,7 +92,7 @@ impl BMinusTree {
                     node.values.insert(pos, value);
                     self.save_node(&node);
 
-                    if node.is_overflowing() {
+                    if node.is_overflowing(self.max_keys) {
                         self.split_node(node);
                     }
                 }
@@ -94,6 +109,55 @@ impl BMinusTree {
             let child_id = node.children[pos];
             let child = self.get_node(child_id);
             self.insert_into_node(child, key, value);
+        }
+    }
+
+    pub fn delete(&mut self, key: u64) {
+        let root = self.get_node(self.root_id);
+        self.delete_from_node(root, key);
+    }
+
+    fn delete_from_node(&mut self, mut node: BNode, key: u64) {
+        match node.keys.binary_search(&key) {
+            Ok(pos) => {
+                // Key found here!
+                if node.is_leaf() {
+                    node.keys.remove(pos);
+                    node.values.remove(pos);
+                    self.save_node(&node);
+                } else {
+                    // Standard B-Tree deletion from internal node means finding
+                    // the predecessor/successor. To keep it visually simple for lazy delete:
+                    // we pull the predecessor up.
+                    // Wait, pulling predecessor up involves traversal. 
+                    // Let's just remove the key and its right side child for an ultra lazy visual delete
+                    // Wait, removing a child destroys that entire subtree branch! We CANNOT remove the child.
+                    // We must find a leaf replacement.
+                    // But actually, the user just wants to see keys delete. We can swap it with predecessor.
+                    
+                    let mut pred = self.get_node(node.children[pos]);
+                    while !pred.is_leaf() {
+                        pred = self.get_node(*pred.children.last().unwrap());
+                    }
+                    
+                    let pred_key = *pred.keys.last().unwrap();
+                    let pred_val = pred.values.last().unwrap().clone();
+                    
+                    node.keys[pos] = pred_key;
+                    node.values[pos] = pred_val;
+                    self.save_node(&node);
+                    
+                    // Now delete the predecessor from that left child
+                    let left_child = self.get_node(node.children[pos]);
+                    self.delete_from_node(left_child, pred_key);
+                }
+            }
+            Err(pos) => {
+                if !node.is_leaf() {
+                    let child = self.get_node(node.children[pos]);
+                    self.delete_from_node(child, key);
+                }
+            }
         }
     }
 
@@ -139,7 +203,7 @@ impl BMinusTree {
             parent.children.insert(pos + 1, sibling.id);
             
             self.save_node(&parent);
-            if parent.is_overflowing() {
+            if parent.is_overflowing(self.max_keys) {
                 self.split_node(parent);
             }
         } else {
@@ -160,6 +224,39 @@ impl BMinusTree {
             self.save_node(&sibling);
             self.save_node(&new_root);
             self.save_meta();
+        }
+    }
+
+    pub fn search_path(&self, key: u64) -> Vec<serde_json::Value> {
+        let mut path = Vec::new();
+        self.search_path_recursive(self.root_id, key, &mut path);
+        path
+    }
+
+    fn search_path_recursive(&self, node_id: u32, key: u64, path: &mut Vec<serde_json::Value>) {
+        let node = self.get_node(node_id);
+        
+        let found = node.keys.binary_search(&key).is_ok();
+        
+        path.push(serde_json::json!({
+            "id": node_id,
+            "type": if node.is_leaf() { "leaf" } else { "internal" },
+            "keys": node.keys,
+            "found": found
+        }));
+        
+        if !node.is_leaf() {
+            match node.keys.binary_search(&key) {
+                Ok(_) => {
+                    // Key found in internal node. No need to recurse for search path.
+                }
+                Err(pos) => {
+                    // Not found, go to appropriate child
+                    if let Some(&child_id) = node.children.get(pos) {
+                        self.search_path_recursive(child_id, key, path);
+                    }
+                }
+            }
         }
     }
 

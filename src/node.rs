@@ -4,8 +4,7 @@ use serde::{Deserialize, Serialize};
 // making it much easier to observe visually in the Web UI.
 // In a real database, this would be computed to perfectly fill an OS Page (e.g., 4096 bytes).
 // E.g., for 4096 bytes, MAX_KEYS could be ~100-300 depending on value size.
-pub const MAX_KEYS: usize = 3;
-
+// In a real database, this would be computed to perfectly fill an OS Page (e.g., 4096 bytes).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum NodeType {
     Internal(InternalNode),
@@ -60,10 +59,10 @@ impl Node {
         matches!(self.node_type, NodeType::Leaf(_))
     }
 
-    pub fn is_overflowing(&self) -> bool {
+    pub fn is_overflowing(&self, max_keys: usize) -> bool {
         match &self.node_type {
-            NodeType::Leaf(leaf) => leaf.keys.len() > MAX_KEYS,
-            NodeType::Internal(internal) => internal.keys.len() > MAX_KEYS,
+            NodeType::Leaf(leaf) => leaf.keys.len() > max_keys,
+            NodeType::Internal(internal) => internal.keys.len() > max_keys,
         }
     }
 

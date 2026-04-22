@@ -32,6 +32,16 @@ impl Pager {
         Ok(Self { file, num_pages })
     }
 
+    pub fn reset(&mut self) -> std::io::Result<()> {
+        self.file.set_len(0)?;
+        self.file.rewind()?;
+        let empty_page = vec![0; PAGE_SIZE];
+        self.file.write_all(&empty_page)?;
+        self.file.sync_all()?;
+        self.num_pages = 1;
+        Ok(())
+    }
+
     pub fn read_page(&mut self, page_num: u32) -> std::io::Result<Vec<u8>> {
         let mut buffer = vec![0u8; PAGE_SIZE];
         self.file.seek(SeekFrom::Start((page_num as usize * PAGE_SIZE) as u64))?;

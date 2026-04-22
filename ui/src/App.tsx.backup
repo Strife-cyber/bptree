@@ -89,13 +89,14 @@ const TreeNode = ({ node, treeType, highlightedNodes, searchKey, searchStep }: T
 
 export default function App() {
   const [treeType, setTreeType] = useState<'bplus' | 'bminus'>('bplus');
-  
+
   // History state
   const [historyPlus, setHistoryPlus] = useState<BTreeNode[]>([]);
   const [historyMinus, setHistoryMinus] = useState<BTreeNode[]>([]);
   const [indexPlus, setIndexPlus] = useState(-1);
   const [indexMinus, setIndexMinus] = useState(-1);
 
+  // Input states
   const [insertKey, setInsertKey] = useState('');
   const [insertValue, setInsertValue] = useState('');
   const [searchKey, setSearchKey] = useState('');
@@ -104,15 +105,15 @@ export default function App() {
   const [updateValue, setUpdateValue] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // Search animation state
   const [highlightedNodes, setHighlightedNodes] = useState<Set<number>>(new Set());
   const [searchTargetKey, setSearchTargetKey] = useState<number | null>(null);
   const [searchCurrentStep, setSearchCurrentStep] = useState<number>(-1);
   const [isSearching, setIsSearching] = useState(false);
-  const [searchSpeed, setSearchSpeed] = useState(1000);
+  const [searchSpeed, setSearchSpeed] = useState(1000); // milliseconds between steps
   const [isPaused, setIsPaused] = useState(false);
-  
-  const [treeDegree, setTreeDegree] = useState(3);
 
+  // Transform ref for zoom/pan
   const transformRef = useRef<any>(null);
 
   // Initialize
@@ -180,39 +181,7 @@ export default function App() {
     }
   };
 
-  const handleBatchInsert = async () => {
-    setLoading(true);
-    try {
-      const endpoint = treeType === 'bplus' ? 'insert' : 'insert_btree';
-      for(let i=0; i<10; i++) {
-        const randomKey = Math.floor(Math.random() * 1000);
-        await fetch(`http://127.0.0.1:3000/${endpoint}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: randomKey, value: `Val-${randomKey}` })
-        });
-      }
-      
-      const fetchEndpoint = treeType === 'bplus' ? 'tree' : 'btree';
-      const res = await fetch(`http://127.0.0.1:3000/${fetchEndpoint}`);
-      const data = await res.json();
-      
-      if (treeType === 'bplus') {
-         const newHistory = historyPlus.slice(0, indexPlus + 1);
-         setHistoryPlus([...newHistory, data]);
-         setIndexPlus(newHistory.length);
-      } else {
-         const newHistory = historyMinus.slice(0, indexMinus + 1);
-         setHistoryMinus([...newHistory, data]);
-         setIndexMinus(newHistory.length);
-      }
-    } catch (e) {
-      console.error('Failed batch insert', e);
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // Animated search with speed control
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchKey || isSearching) return;
@@ -234,17 +203,23 @@ export default function App() {
       const data = await res.json();
       const path: Array<{id: number, found: boolean}> = data.path;
 
+      // Animate through the search path
       for (let i = 0; i < path.length; i++) {
-        if (!isSearching) break;
+        if (!isSearching) break; // Stop if cancelled
+
+        // Wait if paused
         while (isPaused && isSearching) {
           await new Promise(r => setTimeout(r, 100));
         }
+
         const node = path[i];
         setSearchCurrentStep(node.id);
         setHighlightedNodes(prev => new Set([...prev, node.id]));
+
         await new Promise(r => setTimeout(r, searchSpeed));
       }
 
+      // Keep the final result highlighted for a moment
       await new Promise(r => setTimeout(r, searchSpeed));
     } catch (e) {
       console.error('Failed to search', e);
@@ -303,6 +278,7 @@ export default function App() {
 
     setLoading(true);
     try {
+      // Update is just an insert with an existing key
       const endpoint = treeType === 'bplus' ? 'insert' : 'insert_btree';
       await fetch(`http://127.0.0.1:3000/${endpoint}`, {
         method: 'POST',
@@ -336,27 +312,6 @@ export default function App() {
     }
   };
 
-  const handleReset = async () => {
-    setLoading(true);
-    try {
-      await fetch(`http://127.0.0.1:3000/reset`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ max_keys: treeDegree || 3 })
-      });
-      setHistoryPlus([]);
-      setHistoryMinus([]);
-      setIndexPlus(-1);
-      setIndexMinus(-1);
-      await fetchTree('bplus');
-      await fetchTree('bminus');
-    } catch (e) {
-      console.error('Failed to reset', e);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const resetView = () => {
     if (transformRef.current) {
       transformRef.current.resetTransform();
@@ -374,7 +329,7 @@ export default function App() {
       transformRef.current.zoomOut();
     }
   };
-
+  
   const history = treeType === 'bplus' ? historyPlus : historyMinus;
   const currentIndex = treeType === 'bplus' ? indexPlus : indexMinus;
   const currentTree = history[currentIndex] || null;
@@ -400,126 +355,168 @@ export default function App() {
 
         <div className="controls-card">
           <div className="toggle-group">
-            <button type="button" className={`toggle-btn ${treeType === 'bplus' ? 'active' : ''}`} onClick={() => setTreeType('bplus')}>
+            <button
+              type="button"
+              className={`toggle-btn ${treeType === 'bplus' ? 'active' : ''}`}
+              onClick={() => { setTreeType('bplus'); }}
+            >
               B+ Tree
             </button>
-            <button type="button" className={`toggle-btn ${treeType === 'bminus' ? 'active' : ''}`} onClick={() => setTreeType('bminus')}>
+            <button
+              type="button"
+              className={`toggle-btn ${treeType === 'bminus' ? 'active' : ''}`}
+              onClick={() => { setTreeType('bminus'); }}
+            >
               Standard B-Tree
             </button>
           </div>
 
+          {/* Search with Animation Controls */}
           <form onSubmit={handleSearch} className="search-form">
             <div className="section-header">
               <Search size={16} color="var(--accent-warning)" />
               <span>Search Animation</span>
             </div>
             <div className="input-group">
-              <input type="number" placeholder="Search key..." value={searchKey} onChange={(e) => setSearchKey(e.target.value)} disabled={isSearching} />
+              <input
+                type="number"
+                placeholder="Search key..."
+                value={searchKey}
+                onChange={(e) => setSearchKey(e.target.value)}
+                disabled={isSearching}
+              />
               {isSearching ? (
-                <button type="button" onClick={cancelSearch} className={"icon-btn danger"}><X size={18} /></button>
-              ) : (
-                <button type="submit" disabled={!searchKey || isSearching} className={"icon-btn primary"}><Search size={18} /></button>
-              )}
-            </div>
-            <div className="speed-control">
-              <span className="speed-label"><Settings2 size={12} /> Speed</span>
-              <input type="range" min="100" max="10000" step="100" value={10100 - searchSpeed} onChange={(e) => setSearchSpeed(10100 - parseInt(e.target.value))} disabled={isSearching} className="speed-slider" />
-              <span className="speed-value">{(1000 / searchSpeed).toFixed(1)}x</span>
-            </div>
-            {isSearching && (
-              <div className="search-status">
-                {isPaused ? <span className={"status paused"}><Pause size={12} /> Paused</span> : <span className={"status searching"}><Target size={12} /> Searching...</span>}
-              </div>
-            )}
+                <button type="button" onClick={cancelSearch} className={clsx('icon-btn',', ''danger')}>', '<X', 'size={18}', '/>', '</button>', ')', ':', '(', '<button', 'type="submit"', 'disabled={!searchKey', '||', 'isSearching}', 'className={'icon-btn',', ''primary')}>', '<Search', 'size={18}', '/>', '</button>', ')}', '</div>', '{/*', 'Speed', 'Control', '*/}', '<div', 'className="speed-control">', '<span', 'className="speed-label">', '<Settings2', 'size={12}', '/>', 'Speed', '</span>', '<input', 'type="range"', 'min="200"', 'max="2000"', 'step="200"', 'value={2100', '-', 'searchSpeed}', 'onChange={(e)', '=>', 'setSearchSpeed(2100', '-', 'parseInt(e.target.value))}', 'disabled={isSearching}', 'className="speed-slider"', '/>', '<span', 'className="speed-value">{(2000', '/', 'searchSpeed).toFixed(1)}x</span>', '</div>', '{isSearching', '&&', '(', '<div', 'className="search-status">', '{isPaused', '?', '(', '<span', 'className={'status',', ''paused')}><Pause', 'size={12}', '/>', 'Paused</span>', ')', ':', '(', '<span', 'className={'status',', ''searching')}><Target', 'size={12}', '/>', 'Searching...</span>', ')}', '</div>', ')}', '</form>', '{/*', 'Insert', 'Form', '*/}', '<form', 'onSubmit={handleInsert}', 'className="action-form">', '<div', 'className="section-header">', '<Plus', 'size={16}', 'color="var(--accent-success)"', '/>', '<span>Insert', 'Record</span>', '</div>', '<div', 'className="input-group">', '<input', 'type="number"', 'placeholder="Key:', 'e.g.,', '42"', 'value={insertKey}', 'onChange={(e)', '=>', 'setInsertKey(e.target.value)}', 'disabled={loading}', '/>', '<input', 'type="text"', 'placeholder="Value"', 'value={insertValue}', 'onChange={(e)', '=>', 'setInsertValue(e.target.value)}', 'disabled={loading}', '/>', '</div>', '<button', 'type="submit"', 'disabled={loading', '||', '!insertKey}', 'className={'action-btn',', ''insert')}>', '{loading', '?', ''Committing...'', ':', ''Insert')}
+            </button>
           </form>
 
-          <form onSubmit={handleInsert} className="action-form">
-            <div className="section-header"><Plus size={16} color="var(--accent-success)" /><span>Insert Record</span></div>
-            <div className="input-group">
-              <input type="number" placeholder="Key: e.g., 42" value={insertKey} onChange={(e) => setInsertKey(e.target.value)} disabled={loading} />
-              <input type="text" placeholder="Value" value={insertValue} onChange={(e) => setInsertValue(e.target.value)} disabled={loading} />
-            </div>
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
-              <button type="submit" disabled={loading || !insertKey} className={"action-btn insert"} style={{ flex: 2 }}>{loading ? 'Committing...' : 'Insert'}</button>
-              <button type="button" onClick={handleBatchInsert} disabled={loading} className={"action-btn"} style={{ flex: 1, background: 'rgba(255,255,255,0.1)', color: 'white' }}>Batch Random</button>
-            </div>
-          </form>
-
+          {/* Update Form */}
           <form onSubmit={handleUpdate} className="action-form">
-            <div className="section-header"><RefreshCw size={16} color="var(--accent-glow)" /><span>Update Value</span></div>
-            <div className="input-group">
-              <input type="number" placeholder="Existing key..." value={updateKey} onChange={(e) => setUpdateKey(e.target.value)} disabled={loading} />
-              <input type="text" placeholder="New value..." value={updateValue} onChange={(e) => setUpdateValue(e.target.value)} disabled={loading} />
+            <div className="section-header">
+              <RefreshCw size={16} color="var(--accent-glow)" />
+              <span>Update Value</span>
             </div>
-            <button type="submit" disabled={loading || !updateKey || !updateValue} className={"action-btn update"}>{loading ? 'Updating...' : 'Update'}</button>
+            <div className="input-group">
+              <input
+                type="number"
+                placeholder="Existing key..."
+                value={updateKey}
+                onChange={(e) => setUpdateKey(e.target.value)}
+                disabled={loading}
+              />
+              <input
+                type="text"
+                placeholder="New value..."
+                value={updateValue}
+                onChange={(e) => setUpdateValue(e.target.value)}
+                disabled={loading}
+              />
+            </div>
+            <button type="submit" disabled={loading || !updateKey || !updateValue} className={clsx('action-btn',', ''update')}>', '{loading', '?', ''Updating...'', ':', ''Update')}
+            </button>
           </form>
 
+          {/* Delete Form */}
           <form onSubmit={handleDelete} className="action-form">
-            <div className="section-header"><Trash2 size={16} color="#ef4444" /><span>Delete Key</span></div>
-            <div className="input-group">
-              <input type="number" placeholder="Key to delete..." value={deleteKey} onChange={(e) => setDeleteKey(e.target.value)} disabled={loading} />
-              <button type="submit" disabled={loading || !deleteKey} className={"icon-btn danger"}><Trash2 size={18} /></button>
+            <div className="section-header">
+              <Trash2 size={16} color="#ef4444" />
+              <span>Delete Key</span>
             </div>
-          </form>
-
-          {history.length > 0 && (
-            <div className="history-controls">
-              <div className="history-header">
-                <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}><Rewind size={14}/> Time Travel Array</span>
-                <span className="step-badge">State {currentIndex} / {history.length - 1}</span>
+            <div className="input-group">
+              <input
+                type="number"
+                placeholder="Key to delete..."
+                value={deleteKey}
+                onChange={(e) => setDeleteKey(e.target.value)}
+                disabled={loading}
+              />
+              <button type="submit" disabled={loading || !deleteKey} className={clsx('icon-btn',', ''danger')}>', '<Trash2', 'size={18}', '/>', '</button>', '</div>', '</form>', '{history.length', '>', '0', '&&', '(', '<div', 'className="history-controls">', '<div', 'className="history-header">', '<span', 'style={{', 'fontSize:', ''0.85rem',', 'color:', ''var(--text-secondary)',', 'display:', ''flex',', 'alignItems:', ''center',', 'gap:', ''0.5rem')}}>
+                    <Rewind size={14}/> Time Travel Array
+                 </span>
+                 <span className="step-badge">State {currentIndex} / {history.length - 1}</span>
               </div>
-              <input type="range" min="0" max={history.length > 0 ? history.length - 1 : 0} value={currentIndex} onChange={handleSliderChange} className="slider" />
+              <input
+                type="range"
+                min="0"
+                max={history.length > 0 ? history.length - 1 : 0}
+                value={currentIndex}
+                onChange={handleSliderChange}
+                className="slider"
+              />
             </div>
           )}
-
-          <div className="action-form" style={{ marginTop: '1.5rem', borderBottom: 'none' }}>
-             <div className="section-header"><Settings2 size={16} color="var(--text-secondary)" /><span>Tree Configuration</span></div>
-             <div className="input-group">
-                <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', alignSelf: 'center', whiteSpace: 'nowrap' }}>Max Keys:</span>
-                <input type="number" min="3" max="20" value={treeDegree} onChange={(e) => setTreeDegree(parseInt(e.target.value))} disabled={loading} />
-             </div>
-             <button type="button" onClick={handleReset} disabled={loading} className={"action-btn danger"} style={{ background: 'rgba(239, 68, 68, 0.2)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)' }}>Reset Trees (Wipe Data)</button>
-          </div>
         </div>
 
         <div className="controls-card">
           {treeType === 'bplus' ? (
             <>
               <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.1rem', marginBottom: '1rem', color: '#f8fafc' }}>
-                <Layers size={20} color="var(--accent-glow)" /> B+ Tree Architecture
+                <Layers size={20} color="var(--accent-glow)" />
+                B+ Tree Architecture
               </h2>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: '1.6' }}>In a <b>B+ Tree</b>, internal nodes store ONLY routing keys, and all values are physically pushed into the leaf nodes.</p>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: '1.6' }}>
+                In a <b>B+ Tree</b>, internal nodes store ONLY routing keys, and all values are physically pushed into the leaf nodes.
+              </p>
               <br/>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: '1.6' }}>By stripping row values from intermediate layers, nodes can pack exponentially more routing paths per 4KB page block. This extreme fan-out is exactly why production systems like PostgreSQL use them!</p>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: '1.6' }}>
+                By stripping row values from intermediate layers, nodes can pack exponentially more routing paths per 4KB page block. This extreme fan-out is exactly why production systems like PostgreSQL use them!
+              </p>
             </>
           ) : (
             <>
               <h2 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '1.1rem', marginBottom: '1rem', color: '#f8fafc' }}>
-                <ArrowRightLeft size={20} color="var(--accent-success)" /> Classical B-Tree
+                <ArrowRightLeft size={20} color="var(--accent-success)" />
+                Classical B-Tree
               </h2>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: '1.6' }}>In a strictly <b>Classical B-Tree</b>, every single node persistently stores both its router key and its row data value.</p>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: '1.6' }}>
+                In a strictly <b>Classical B-Tree</b>, every single node persistently stores both its router key and its row data value.
+              </p>
               <br/>
-              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: '1.6' }}>Notice how values propagate through every depth. While retrieving the root node is technically O(1), the massive disk-page fragmentation throttles fan-out efficiency and cripples deeper sequential range scans.</p>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: '1.6' }}>
+                Notice how values propagate through every depth. While retrieving the root node is technically O(1), the massive disk-page fragmentation throttles fan-out efficiency and cripples deeper sequential range scans.
+              </p>
             </>
           )}
         </div>
       </div>
 
       <div className="visualizer-area">
+        {/* Zoom Controls */}
         <div className="zoom-controls">
-          <button onClick={zoomIn} className="zoom-btn" title="Zoom In"><ZoomIn size={20} /></button>
-          <button onClick={zoomOut} className="zoom-btn" title="Zoom Out"><ZoomOut size={20} /></button>
-          <button onClick={resetView} className="zoom-btn" title="Fit to Screen"><Maximize size={20} /></button>
+          <button onClick={zoomIn} className="zoom-btn" title="Zoom In">
+            <ZoomIn size={20} />
+          </button>
+          <button onClick={zoomOut} className="zoom-btn" title="Zoom Out">
+            <ZoomOut size={20} />
+          </button>
+          <button onClick={resetView} className="zoom-btn" title="Fit to Screen">
+            <Maximize size={20} />
+          </button>
         </div>
 
-        <TransformWrapper ref={transformRef} initialScale={1} minScale={0.2} maxScale={3} centerOnInit={true}>
+        <TransformWrapper
+          ref={transformRef}
+          initialScale={1}
+          minScale={0.2}
+          maxScale={3}
+          centerOnInit={true}
+        >
           {() => (
-            <TransformComponent wrapperClass="transform-wrapper" contentClass="transform-content">
+            <TransformComponent
+              wrapperClass="transform-wrapper"
+              contentClass="transform-content"
+            >
               <div className="canvas-container">
                 <div className="tree">
                   {currentTree ? (
                     <ul>
-                      <TreeNode node={currentTree} treeType={treeType} highlightedNodes={highlightedNodes} searchKey={searchTargetKey} searchStep={searchCurrentStep} />
+                      <TreeNode
+                        node={currentTree}
+                        treeType={treeType}
+                        highlightedNodes={highlightedNodes}
+                        searchKey={searchTargetKey}
+                        searchStep={searchCurrentStep}
+                      />
                     </ul>
                   ) : (
                     <div style={{ color: 'var(--text-secondary)', marginTop: '4rem' }}>Awaiting Disk Initialization...</div>

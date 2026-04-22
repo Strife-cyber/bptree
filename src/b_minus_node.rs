@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 // Standard B-Tree MAX_KEYS (e.g., degree/order). 
 // Keeping it small (3 or 4) to visualize splits.
-pub const BMINUS_MAX_KEYS: usize = 3;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BNode {
@@ -28,8 +27,8 @@ impl BNode {
         self.children.is_empty()
     }
 
-    pub fn is_overflowing(&self) -> bool {
-        self.keys.len() > BMINUS_MAX_KEYS
+    pub fn is_overflowing(&self, max_keys: usize) -> bool {
+        self.keys.len() > max_keys
     }
 
     pub fn serialize(&self) -> Vec<u8> {

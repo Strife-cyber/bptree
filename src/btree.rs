@@ -1,20 +1,22 @@
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use crate::pager::Pager;
-use crate::node::{Node, NodeType, LeafNode, InternalNode, MAX_KEYS};
+use crate::node::{Node, NodeType, LeafNode, InternalNode};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MetaPage {
     pub root_id: u32,
+    pub max_keys: usize,
 }
 
 pub struct BTree {
     pub pager: Arc<Mutex<Pager>>,
     pub root_id: u32,
+    pub max_keys: usize,
 }
 
 impl BTree {
-    pub fn new(pager: Arc<Mutex<Pager>>) -> Self {
+    pub fn new(pager: Arc<Mutex<Pager>>, max_keys: usize) -> Self {
         let mut p = pager.lock().unwrap();
         
         // Check if DB is empty / new
@@ -25,21 +27,37 @@ impl BTree {
             p.write_page(root_id, &root_node.serialize()).unwrap();
             
             // Write meta page
-            let meta = MetaPage { root_id };
+            let meta = MetaPage { root_id, max_keys };
             let meta_bytes = bincode::serialize(&meta).unwrap();
             p.write_page(0, &meta_bytes).unwrap();
             
             drop(p);
-            return Self { pager, root_id };
+            return Self { pager, root_id, max_keys };
         }
         
         let meta_bytes = p.read_page(0).unwrap();
         // Ignore trailing zeros from the page buffer
         let meta: MetaPage = bincode::deserialize(&meta_bytes).unwrap();
         let root_id = meta.root_id;
+        let db_max_keys = meta.max_keys;
         drop(p);
         
-        Self { pager, root_id }
+        Self { pager, root_id, max_keys: db_max_keys }
+    }
+
+    pub fn reset(&mut self, max_keys: usize) {
+        let mut p = self.pager.lock().unwrap();
+        p.reset().unwrap();
+        self.max_keys = max_keys;
+        
+        let root_id = p.allocate_page();
+        let root_node = Node::new_leaf(root_id);
+        p.write_page(root_id, &root_node.serialize()).unwrap();
+        
+        let meta = MetaPage { root_id, max_keys };
+        let meta_bytes = bincode::serialize(&meta).unwrap();
+        p.write_page(0, &meta_bytes).unwrap();
+        self.root_id = root_id;
     }
 
     pub fn get_node(&self, id: u32) -> Node {
@@ -54,7 +72,7 @@ impl BTree {
     }
 
     fn save_meta(&mut self) {
-        let meta = MetaPage { root_id: self.root_id };
+        let meta = MetaPage { root_id: self.root_id, max_keys: self.max_keys };
         let meta_bytes = bincode::serialize(&meta).unwrap();
         let mut p = self.pager.lock().unwrap();
         p.write_page(0, &meta_bytes).unwrap();
@@ -80,17 +98,46 @@ impl BTree {
                         leaf.values.insert(pos, value);
                         self.save_node(&node);
 
-                        if node.is_overflowing() {
+                        if node.is_overflowing(self.max_keys) {
                             self.split_node(node);
                         }
                     }
                 }
             }
             NodeType::Internal(internal) => {
-                let pos = internal.keys.binary_search(&key).unwrap_or_else(|e| e);
+                let pos = match internal.keys.binary_search(&key) {
+                    Ok(pos) => pos + 1,
+                    Err(pos) => pos,
+                };
                 let child_id = internal.children[pos];
                 let child = self.get_node(child_id);
                 self.insert_into_node(child, key, value);
+            }
+        }
+    }
+
+    pub fn delete(&mut self, key: u64) {
+        let root = self.get_node(self.root_id);
+        self.delete_from_node(root, key);
+    }
+
+    fn delete_from_node(&mut self, mut node: Node, key: u64) {
+        match &mut node.node_type {
+            NodeType::Leaf(leaf) => {
+                if let Ok(pos) = leaf.keys.binary_search(&key) {
+                    leaf.keys.remove(pos);
+                    leaf.values.remove(pos);
+                    self.save_node(&node);
+                }
+            }
+            NodeType::Internal(internal) => {
+                let pos = match internal.keys.binary_search(&key) {
+                    Ok(pos) => pos + 1,
+                    Err(pos) => pos,
+                };
+                let child_id = internal.children[pos];
+                let child = self.get_node(child_id);
+                self.delete_from_node(child, key);
             }
         }
     }
@@ -168,7 +215,7 @@ impl BTree {
             }
             self.save_node(&parent);
             
-            if parent.is_overflowing() {
+            if parent.is_overflowing(self.max_keys) {
                 self.split_node(parent);
             }
         } else {
@@ -191,6 +238,45 @@ impl BTree {
             self.save_node(&sibling);
             self.save_node(&new_root);
             self.save_meta();
+        }
+    }
+
+    pub fn search_path(&self, key: u64) -> Vec<serde_json::Value> {
+        let mut path = Vec::new();
+        self.search_path_recursive(self.root_id, key, &mut path);
+        path
+    }
+
+    fn search_path_recursive(&self, node_id: u32, key: u64, path: &mut Vec<serde_json::Value>) {
+        let node = self.get_node(node_id);
+        
+        match &node.node_type {
+            NodeType::Leaf(leaf) => {
+                let found = leaf.keys.binary_search(&key).is_ok();
+                path.push(serde_json::json!({
+                    "id": node_id,
+                    "type": "leaf",
+                    "keys": leaf.keys,
+                    "found": found
+                }));
+            }
+            NodeType::Internal(internal) => {
+                let pos = match internal.keys.binary_search(&key) {
+                    Ok(pos) => pos + 1,
+                    Err(pos) => pos,
+                };
+                let found_in_node = internal.keys.binary_search(&key).is_ok();
+                path.push(serde_json::json!({
+                    "id": node_id,
+                    "type": "internal",
+                    "keys": internal.keys,
+                    "next_child": internal.children.get(pos).copied(),
+                    "found": found_in_node
+                }));
+                if let Some(&child_id) = internal.children.get(pos) {
+                    self.search_path_recursive(child_id, key, path);
+                }
+            }
         }
     }
 
