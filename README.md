@@ -22,25 +22,43 @@ Db Engine Vis is an incredibly powerful, interactive, and beautifully designed w
 
 ## 🚀 Getting Started
 
-To run this application, you will need **Rust** and **Node.js** installed.
+### Option 1: Standalone Executable (Recommended)
 
-### 1. Start the Rust DB Engine
+The easiest way to run the application is to build a single executable that embeds the frontend:
 
-Navigate to the project root and start the backend HTTP server:
+```bash
+# Build the frontend
+cd ui
+npm install
+npm run build
+cd ..
+
+# Build the standalone executable
+cargo build --release
+
+# Run the server
+./target/release/btrees
+```
+
+Then open `http://127.0.0.1:3000` in your browser. The frontend is served directly from the embedded binary!
+
+### Option 2: Development Mode
+
+For development, run the frontend and backend separately:
+
+**Terminal 1 - Backend:**
 ```bash
 cargo run
 ```
-This initializes `axum` on `http://127.0.0.1:3000` and creates the `.db` files representing our raw disk-backed B-Trees.
 
-### 2. Start the React UI
-
-In a new terminal window, navigate to the `ui` folder and start the Vite development server:
+**Terminal 2 - Frontend:**
 ```bash
 cd ui
 npm install
 npm run dev
 ```
-Open `http://localhost:5173` in your browser.
+
+Open `http://localhost:5173` for the dev server with hot reload.
 
 ## 🧠 Educational Insights
 
@@ -66,8 +84,22 @@ In a strictly **Classical B-Tree**, every single node persistently stores both i
 
 ## 🛠️ Tech Stack
 
-- **Backend (Engine)**: Rust, Axum, Tokio, Bincode Serialization, File I/O.
+- **Backend (Engine)**: Rust, Axum, Tokio, rust-embed (for single-binary deployment), Bincode Serialization, File I/O.
 - **Frontend (Visualizer)**: React (Vite), TypeScript, Framer Motion (for physics-based layout animations), React-Zoom-Pan-Pinch, Lucide Icons, Vanilla CSS.
+
+## 📦 Single Executable Distribution
+
+This project uses `rust-embed` to embed the entire React frontend into the Rust binary at compile time. This creates a standalone executable that:
+- Contains both the backend API and frontend UI
+- Requires no external files or dependencies
+- Can be distributed as a single `.exe` file
+- Automatically serves the embedded files from memory
+
+To create a portable Windows executable:
+```bash
+cargo build --release
+# The executable will be at: target/release/btrees.exe
+```
 
 ## 🤝 Contributing
 

@@ -7,7 +7,10 @@ mod b_minus_tree;
 use axum::{
     routing::{get, post},
     Router, Json, extract::State,
+    http::{header, StatusCode, Uri},
+    response::{Html, IntoResponse, Response},
 };
+use rust_embed::Embed;
 use std::sync::{Arc, Mutex};
 use tower_http::cors::{CorsLayer, Any};
 use serde::Deserialize;
@@ -15,6 +18,10 @@ use serde::Deserialize;
 use pager::Pager;
 use btree::BTree;
 use b_minus_tree::BMinusTree;
+
+#[derive(Embed)]
+#[folder = "ui/dist/"]
+struct StaticFiles;
 
 #[derive(Clone)]
 struct AppState {
@@ -70,12 +77,40 @@ async fn main() {
         .route("/delete_btree", post(delete_key_minus))
         .route("/search_btree", post(search_key_minus))
         .route("/reset", post(reset_trees))
+        .route("/", get(serve_index))
+        .route("/{*path}", get(serve_static))
         .layer(cors)
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
     println!("Server listening on http://127.0.0.1:3000");
+    println!("Open your browser to http://127.0.0.1:3000");
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn serve_index() -> Response {
+    match StaticFiles::get("index.html") {
+        Some(content) => Html(content.data).into_response(),
+        None => (StatusCode::NOT_FOUND, "index.html not found").into_response(),
+    }
+}
+
+async fn serve_static(axum::extract::Path(path): axum::extract::Path<String>) -> Response {
+    // Try to get the file from embedded assets
+    match StaticFiles::get(&path) {
+        Some(content) => {
+            let mime_type = mime_guess::from_path(&path).first_or_octet_stream();
+            Response::builder()
+                .header(header::CONTENT_TYPE, mime_type.as_ref())
+                .body(axum::body::Body::from(content.data))
+                .unwrap()
+                .into_response()
+        }
+        None => {
+            // If file not found, serve index.html (for SPA routing)
+            serve_index().await
+        }
+    }
 }
 
 // B+ TREE ENDPOINTS
