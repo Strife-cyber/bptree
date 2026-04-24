@@ -33,7 +33,25 @@ impl BMinusTree {
         }
 
         let meta_bytes = p.read_page(0).unwrap();
-        let meta: BMinusMetaPage = bincode::deserialize(&meta_bytes).unwrap();
+        // Strip trailing zeros from the page buffer before deserializing
+        let actual_len = meta_bytes.iter().rposition(|&b| b != 0).map(|i| i + 1).unwrap_or(0);
+
+        // If meta page is empty/corrupted, treat as fresh database
+        if actual_len == 0 {
+            let root_id = p.allocate_page();
+            let root = BNode::new(root_id);
+            p.write_page(root_id, &root.serialize()).unwrap();
+
+            // Write meta page
+            let meta = BMinusMetaPage { root_id, max_keys };
+            let meta_bytes = bincode::serialize(&meta).unwrap();
+            p.write_page(0, &meta_bytes).unwrap();
+
+            drop(p);
+            return Self { pager, root_id, max_keys };
+        }
+
+        let meta: BMinusMetaPage = bincode::deserialize(&meta_bytes[..actual_len]).unwrap();
         let root_id = meta.root_id;
         let db_max_keys = meta.max_keys;
         drop(p);

@@ -79,8 +79,25 @@ impl BTree {
         }
 
         let meta_bytes = p.read_page(0).unwrap();
-        // Ignore trailing zeros from the page buffer
-        let meta: MetaPage = bincode::deserialize(&meta_bytes).unwrap();
+        // Strip trailing zeros from the page buffer before deserializing
+        let actual_len = meta_bytes.iter().rposition(|&b| b != 0).map(|i| i + 1).unwrap_or(0);
+
+        // If meta page is empty/corrupted, treat as fresh database
+        if actual_len == 0 {
+            let root_id = p.allocate_page();
+            let root = Node::new_leaf(root_id);
+            p.write_page(root_id, &root.serialize()).unwrap();
+
+            // Write meta page
+            let meta = MetaPage { root_id, max_keys };
+            let meta_bytes = bincode::serialize(&meta).unwrap();
+            p.write_page(0, &meta_bytes).unwrap();
+
+            drop(p);
+            return Self { pager, root_id, max_keys };
+        }
+
+        let meta: MetaPage = bincode::deserialize(&meta_bytes[..actual_len]).unwrap();
         let root_id = meta.root_id;
         let db_max_keys = meta.max_keys;
         drop(p);
@@ -338,6 +355,11 @@ impl BTree {
                 }
                 self.save_node(&left_sibling);
                 self.save_node(&parent);
+                // Check if merged node is now overflowing and needs split
+                if left_sibling.is_overflowing(self.max_keys) {
+                    Logger::operation("SPLIT_AFTER_MERGE", &format!("node={} overflow after merge, splitting", left_sibling.id));
+                    self.split_node(left_sibling);
+                }
                 if let Some(gp_id) = parent.parent {
                     if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
                         Logger::operation("REBALANCE_RECURSIVE", &format!("parent={} underflow, rebalancing with grandparent={}", parent_id, gp_id));
@@ -358,6 +380,11 @@ impl BTree {
                 }
                 self.save_node(&child);
                 self.save_node(&parent);
+                // Check if merged node is now overflowing and needs split
+                if child.is_overflowing(self.max_keys) {
+                    Logger::operation("SPLIT_AFTER_MERGE", &format!("node={} overflow after merge, splitting", child.id));
+                    self.split_node(child);
+                }
                 if let Some(gp_id) = parent.parent {
                     if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
                         Logger::operation("REBALANCE_RECURSIVE", &format!("parent={} underflow, rebalancing with grandparent={}", parent_id, gp_id));
@@ -439,6 +466,11 @@ impl BTree {
                 }
                 self.save_node(&left_sibling);
                 self.save_node(&parent);
+                // Check if merged node is now overflowing and needs split
+                if left_sibling.is_overflowing(self.max_keys) {
+                    Logger::operation("SPLIT_AFTER_MERGE", &format!("node={} overflow after merge, splitting", left_sibling.id));
+                    self.split_node(left_sibling);
+                }
                 if let Some(gp_id) = parent.parent {
                     if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
                         Logger::operation("REBALANCE_RECURSIVE", &format!("parent={} underflow after merge, rebalancing with grandparent={}", parent_id, gp_id));
@@ -464,6 +496,11 @@ impl BTree {
                 }
                 self.save_node(&child);
                 self.save_node(&parent);
+                // Check if merged node is now overflowing and needs split
+                if child.is_overflowing(self.max_keys) {
+                    Logger::operation("SPLIT_AFTER_MERGE", &format!("node={} overflow after merge, splitting", child.id));
+                    self.split_node(child);
+                }
                 if let Some(gp_id) = parent.parent {
                     if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
                         Logger::operation("REBALANCE_RECURSIVE", &format!("parent={} underflow after merge, rebalancing with grandparent={}", parent_id, gp_id));

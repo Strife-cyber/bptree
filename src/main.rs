@@ -62,6 +62,10 @@ async fn main() {
     
     let state = AppState { btree, bminus_tree };
 
+    // Clone Arc handles now, before state is moved into the router
+    let btree_shutdown  = state.btree.clone();
+    let bminus_shutdown = state.bminus_tree.clone();
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_headers(Any)
@@ -85,7 +89,36 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
     println!("Server listening on http://127.0.0.1:3000");
     println!("Open your browser to http://127.0.0.1:3000");
-    axum::serve(listener, app).await.unwrap();
+    println!("Press Ctrl+C to stop the server gracefully.");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            // Wait for Ctrl+C (SIGINT) or SIGTERM on Unix
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
+
+            println!("\nShutting down – flushing data to disk...");
+
+            // Wait for any in-flight tree operation to finish (the Mutex serialises all writes),
+            // then sync both files so no OS-buffered pages are lost.
+            {
+                let tree = btree_shutdown.lock().unwrap();
+                if let Err(e) = tree.pager.lock().unwrap().flush() {
+                    eprintln!("WARNING: failed to flush B+ tree: {}", e);
+                }
+            }
+            {
+                let tree = bminus_shutdown.lock().unwrap();
+                if let Err(e) = tree.pager.lock().unwrap().flush() {
+                    eprintln!("WARNING: failed to flush B- tree: {}", e);
+                }
+            }
+
+            println!("Flush complete. Goodbye!");
+        })
+        .await
+        .unwrap();
 }
 
 async fn serve_index() -> Response {

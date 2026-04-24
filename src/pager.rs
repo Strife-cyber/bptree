@@ -19,7 +19,8 @@ impl Pager {
             .open(path)?;
 
         let file_len = file.metadata()?.len();
-        let mut num_pages = (file_len / PAGE_SIZE as u64) as u32;
+        // Round up so a partial trailing page is still counted and safe to read.
+        let mut num_pages = ((file_len + PAGE_SIZE as u64 - 1) / PAGE_SIZE as u64) as u32;
 
         if num_pages == 0 {
             // Initialize meta page (page 0)
@@ -44,8 +45,17 @@ impl Pager {
 
     pub fn read_page(&mut self, page_num: u32) -> std::io::Result<Vec<u8>> {
         let mut buffer = vec![0u8; PAGE_SIZE];
-        self.file.seek(SeekFrom::Start((page_num as usize * PAGE_SIZE) as u64))?;
-        self.file.read_exact(&mut buffer)?;
+        let offset = (page_num as u64) * (PAGE_SIZE as u64);
+        self.file.seek(SeekFrom::Start(offset))?;
+        // Use read() instead of read_exact() to gracefully handle short/partial pages.
+        let mut total_read = 0;
+        while total_read < PAGE_SIZE {
+            match self.file.read(&mut buffer[total_read..]) {
+                Ok(0) => break, // EOF – remaining bytes stay zero-padded
+                Ok(n) => total_read += n,
+                Err(e) => return Err(e),
+            }
+        }
         Ok(buffer)
     }
 
@@ -70,6 +80,12 @@ impl Pager {
         }
         
         Ok(())
+    }
+
+    /// Flush all OS-buffered writes to disk. Call this during graceful shutdown
+    /// to ensure no partially-written pages are left on disk.
+    pub fn flush(&mut self) -> std::io::Result<()> {
+        self.file.sync_all()
     }
 
     pub fn allocate_page(&mut self) -> u32 {

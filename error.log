@@ -1,0 +1,139 @@
+warning: unused imports: `Arc` and `Mutex`
+ --> src\pager.rs:4:17
+  |
+4 | use std::sync::{Arc, Mutex};
+  |                 ^^^  ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Uri`
+  --> src\main.rs:10:32
+   |
+10 |     http::{header, StatusCode, Uri},
+   |                                ^^^
+
+warning: variable does not need to be mutable
+   --> src\btree.rs:180:13
+    |
+180 |         let mut root = self.get_node(self.root_id);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src\btree.rs:287:21
+    |
+287 |                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+    |                     ----^^^^^^^^^^
+    |                     |
+    |                     help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\btree.rs:308:21
+    |
+308 |                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+    |                     ----^^^^^^^^^^
+    |                     |
+    |                     help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\btree.rs:329:21
+    |
+329 |                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+    |                     ----^^^^^^^^^^
+    |                     |
+    |                     help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\btree.rs:349:21
+    |
+349 |                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+    |                     ----^^^^^^^^^^
+    |                     |
+    |                     help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\btree.rs:373:21
+    |
+373 |                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+    |                     ----^^^^^^^^^^
+    |                     |
+    |                     help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\btree.rs:399:21
+    |
+399 |                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+    |                     ----^^^^^^^^^^
+    |                     |
+    |                     help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\btree.rs:425:21
+    |
+425 |                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+    |                     ----^^^^^^^^^^
+    |                     |
+    |                     help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\btree.rs:450:21
+    |
+450 |                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
+    |                     ----^^^^^^^^^^
+    |                     |
+    |                     help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\btree.rs:484:21
+    |
+484 |                 let mut new_leaf = LeafNode {
+    |                     ----^^^^^^^^
+    |                     |
+    |                     help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\btree.rs:502:21
+    |
+502 |                 let mut new_internal = InternalNode {
+    |                     ----^^^^^^^^^^^^
+    |                     |
+    |                     help: remove this `mut`
+
+warning: unused variable: `leaf`
+   --> src\btree.rs:517:28
+    |
+517 |             NodeType::Leaf(leaf) => {
+    |                            ^^^^ help: if this is intentional, prefix it with an underscore: `_leaf`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src\b_minus_tree.rs:127:13
+    |
+127 |         let mut root = self.get_node(self.root_id);
+    |             ----^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: associated function `info` is never used
+  --> src\btree.rs:25:12
+   |
+12 | impl Logger {
+   | ----------- associated function in this implementation
+...
+25 |     pub fn info(msg: &str) {
+   |            ^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `btrees` (bin "btrees") generated 16 warnings (run `cargo fix --bin "btrees" -p btrees` to apply 15 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running `target\debug\btrees.exe --quiet`
+
+thread 'main' (7616) panicked at src\btree.rs:84:78:
+called `Result::unwrap()` on an `Err` value: Io(Kind(UnexpectedEof))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: process didn't exit successfully: `target\debug\btrees.exe --quiet` (exit code: 101)
