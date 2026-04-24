@@ -55,7 +55,7 @@ async fn main() {
     // initialize disk connection for B+ Tree
     let pager_plus = Arc::new(Mutex::new(Pager::new("bplus_tree.db").unwrap()));
     let btree = Arc::new(Mutex::new(BTree::new(pager_plus, 3)));
-    
+
     // initialize disk connection for B- Tree
     let pager_minus = Arc::new(Mutex::new(Pager::new("bminus_tree.db").unwrap()));
     let bminus_tree = Arc::new(Mutex::new(BMinusTree::new(pager_minus, 3)));
@@ -193,9 +193,9 @@ async fn reset_trees(
 ) -> Json<serde_json::Value> {
     let mut btree = state.btree.lock().unwrap();
     btree.reset(payload.max_keys);
-    
+
     let mut bminus_tree = state.bminus_tree.lock().unwrap();
     bminus_tree.reset(payload.max_keys);
-    
+
     Json(serde_json::json!({ "status": "ok" }))
 }

@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
+import html2canvas from 'html2canvas';
 import {
   Database, Layers, ArrowRightLeft, Plus, Rewind,
   Search, Trash2, RefreshCw, ZoomIn, ZoomOut, Maximize, Pause,
-  Settings2, Target, X
+  Settings2, Target, X, Download, Sun, Moon, Eye, EyeOff, FileImage, FileCode
 } from 'lucide-react';
 import './index.css';
 
@@ -23,9 +24,10 @@ interface TreeNodeProps {
   highlightedNodes: Set<number>;
   searchTargetKey: { nodeId: number, keyIndex: number } | null;
   searchStep: number;
+  showPageNumbers: boolean;
 }
 
-const TreeNode = ({ node, treeType, highlightedNodes, searchTargetKey, searchStep }: TreeNodeProps) => {
+const TreeNode = ({ node, treeType, highlightedNodes, searchTargetKey, searchStep, showPageNumbers }: TreeNodeProps) => {
   const isHighlighted = highlightedNodes.has(node.id);
   const isCurrentSearch = searchStep === node.id;
 
@@ -43,12 +45,12 @@ const TreeNode = ({ node, treeType, highlightedNodes, searchTargetKey, searchSte
                ? '0 0 30px rgba(245, 158, 11, 0.6)'
                : isHighlighted
                  ? '0 0 20px rgba(99, 102, 241, 0.4)'
-                 : '0 10px 30px -10px rgba(0,0,0,0.8)'
+                 : 'var(--shadow-color)'
            }}
            transition={{ type: 'spring', stiffness: 350, damping: 25 }}
            className={`node-box ${node.type} ${isHighlighted ? 'highlighted' : ''} ${isCurrentSearch ? 'search-current' : ''}`}
         >
-          <div className="node-id">Page {node.id}</div>
+          <div className={`node-id ${showPageNumbers ? '' : 'hidden'}`}>Page {node.id}</div>
           {node.keys.map((key, i) => {
             const isComparing = searchTargetKey?.nodeId === node.id && searchTargetKey.keyIndex === i;
             return (
@@ -80,6 +82,7 @@ const TreeNode = ({ node, treeType, highlightedNodes, searchTargetKey, searchSte
                 highlightedNodes={highlightedNodes}
                 searchTargetKey={searchTargetKey}
                 searchStep={searchStep}
+                showPageNumbers={showPageNumbers}
               />
             ))}
           </AnimatePresence>
@@ -91,7 +94,7 @@ const TreeNode = ({ node, treeType, highlightedNodes, searchTargetKey, searchSte
 
 export default function App() {
   const [treeType, setTreeType] = useState<'bplus' | 'bminus'>('bplus');
-  
+
   // History state
   const [historyPlus, setHistoryPlus] = useState<BTreeNode[]>([]);
   const [historyMinus, setHistoryMinus] = useState<BTreeNode[]>([]);
@@ -112,19 +115,75 @@ export default function App() {
   const [isSearching, setIsSearching] = useState(false);
   const [searchSpeed, setSearchSpeed] = useState(1000);
   const [isPaused, setIsPaused] = useState(false);
-  
+
   const isSearchingRef = useRef(false);
   const isPausedRef = useRef(false);
   const speedRef = useRef(1000);
-  
+
   // Sync speed to ref
   useEffect(() => {
     speedRef.current = searchSpeed;
   }, [searchSpeed]);
-  
+
   const [treeDegree, setTreeDegree] = useState(3);
 
+  // Theme state
+  const [isDarkMode, setIsDarkMode] = useState(true);
+
+  // View options state
+  const [showPageNumbers, setShowPageNumbers] = useState(true);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+
+  // Theme effect
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', isDarkMode ? 'dark' : 'light');
+  }, [isDarkMode]);
+
   const transformRef = useRef<any>(null);
+  const treeContainerRef = useRef<HTMLDivElement>(null);
+
+  // Export functions
+  const exportAsPNG = async () => {
+    if (!treeContainerRef.current) return;
+
+    try {
+      const canvas = await html2canvas(treeContainerRef.current, {
+        backgroundColor: isDarkMode ? '#09090b' : '#f8fafc',
+        scale: 2,
+        useCORS: true,
+      });
+
+      const link = document.createElement('a');
+      link.download = `btree-${treeType}-${new Date().toISOString().slice(0, 10)}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    } catch (err) {
+      console.error('Failed to export PNG:', err);
+    }
+    setShowExportMenu(false);
+  };
+
+  const exportAsSVG = () => {
+    if (!treeContainerRef.current) return;
+
+    const svgData = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${treeContainerRef.current.scrollWidth}" height="${treeContainerRef.current.scrollHeight}">
+      <foreignObject width="100%" height="100%">
+        <div xmlns="http://www.w3.org/1999/xhtml">
+          ${treeContainerRef.current.innerHTML}
+        </div>
+      </foreignObject>
+    </svg>`;
+
+    const blob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.download = `btree-${treeType}-${new Date().toISOString().slice(0, 10)}.svg`;
+    link.href = url;
+    link.click();
+    URL.revokeObjectURL(url);
+    setShowExportMenu(false);
+  };
 
   // Initialize
   useEffect(() => {
@@ -463,6 +522,18 @@ export default function App() {
             </button>
           </div>
 
+          <div className="view-options">
+            <label className="view-option">
+              <input
+                type="checkbox"
+                checked={showPageNumbers}
+                onChange={(e) => setShowPageNumbers(e.target.checked)}
+              />
+              {showPageNumbers ? <Eye size={14} /> : <EyeOff size={14} />}
+              Page Numbers
+            </label>
+          </div>
+
           <form onSubmit={handleSearch} className="search-form">
             <div className="section-header">
               <Search size={16} color="var(--accent-warning)" />
@@ -538,7 +609,7 @@ export default function App() {
                 <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', alignSelf: 'center', whiteSpace: 'nowrap' }}>Max Keys:</span>
                 <input type="number" min="3" max="20" value={treeDegree} onChange={(e) => setTreeDegree(parseInt(e.target.value))} disabled={loading} />
              </div>
-             <button type="button" onClick={handleReset} disabled={loading} className={"action-btn danger"} style={{ background: 'rgba(239, 68, 68, 0.2)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)' }}>Reset Trees (Wipe Data)</button>
+             <button type="button" onClick={handleReset} disabled={loading} className={"action-btn danger"} style={{ background: 'rgba(239, 68, 68, 0.2)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)', marginTop: '1rem' }}>Reset Trees (Wipe Data)</button>
           </div>
         </div>
 
@@ -566,20 +637,53 @@ export default function App() {
       </div>
 
       <div className="visualizer-area">
+        <div className="export-menu">
+          <div className="export-dropdown">
+            <button
+              className="export-btn"
+              onClick={() => setShowExportMenu(!showExportMenu)}
+              title="Export Tree"
+            >
+              <Download size={18} />
+              Export
+            </button>
+            {showExportMenu && (
+              <div className="export-options">
+                <button className="export-option" onClick={exportAsPNG}>
+                  <FileImage size={16} />
+                  PNG
+                </button>
+                <button className="export-option" onClick={exportAsSVG}>
+                  <FileCode size={16} />
+                  SVG
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
         <div className="zoom-controls">
           <button onClick={zoomIn} className="zoom-btn" title="Zoom In"><ZoomIn size={20} /></button>
           <button onClick={zoomOut} className="zoom-btn" title="Zoom Out"><ZoomOut size={20} /></button>
           <button onClick={resetView} className="zoom-btn" title="Fit to Screen"><Maximize size={20} /></button>
         </div>
 
+        <button
+          className="theme-toggle"
+          onClick={() => setIsDarkMode(!isDarkMode)}
+          title={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+        >
+          {isDarkMode ? <Sun size={22} /> : <Moon size={22} />}
+        </button>
+
         <TransformWrapper ref={transformRef} initialScale={1} minScale={0.05} maxScale={3} centerOnInit={true} limitToBounds={false}>
           {() => (
             <TransformComponent wrapperClass="transform-wrapper" contentClass="transform-content">
-              <div className="canvas-container">
+              <div className="canvas-container" ref={treeContainerRef}>
                 <div className="tree">
                   {currentTree ? (
                     <ul>
-                      <TreeNode node={currentTree} treeType={treeType} highlightedNodes={highlightedNodes} searchTargetKey={searchTargetKey} searchStep={searchCurrentStep} />
+                      <TreeNode node={currentTree} treeType={treeType} highlightedNodes={highlightedNodes} searchTargetKey={searchTargetKey} searchStep={searchCurrentStep} showPageNumbers={showPageNumbers} />
                     </ul>
                   ) : (
                     <div style={{ color: 'var(--text-secondary)', marginTop: '4rem' }}>Awaiting Disk Initialization...</div>

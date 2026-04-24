@@ -18,30 +18,30 @@ pub struct BTree {
 impl BTree {
     pub fn new(pager: Arc<Mutex<Pager>>, max_keys: usize) -> Self {
         let mut p = pager.lock().unwrap();
-        
+
         // Check if DB is empty / new
         if p.num_pages == 1 {
             // Allocate root node
             let root_id = p.allocate_page();
             let root_node = Node::new_leaf(root_id);
             p.write_page(root_id, &root_node.serialize()).unwrap();
-            
+
             // Write meta page
             let meta = MetaPage { root_id, max_keys };
             let meta_bytes = bincode::serialize(&meta).unwrap();
             p.write_page(0, &meta_bytes).unwrap();
-            
+
             drop(p);
             return Self { pager, root_id, max_keys };
         }
-        
+
         let meta_bytes = p.read_page(0).unwrap();
         // Ignore trailing zeros from the page buffer
         let meta: MetaPage = bincode::deserialize(&meta_bytes).unwrap();
         let root_id = meta.root_id;
         let db_max_keys = meta.max_keys;
         drop(p);
-        
+
         Self { pager, root_id, max_keys: db_max_keys }
     }
 
@@ -49,15 +49,21 @@ impl BTree {
         let mut p = self.pager.lock().unwrap();
         p.reset().unwrap();
         self.max_keys = max_keys;
-        
+
         let root_id = p.allocate_page();
         let root_node = Node::new_leaf(root_id);
         p.write_page(root_id, &root_node.serialize()).unwrap();
-        
+
         let meta = MetaPage { root_id, max_keys };
         let meta_bytes = bincode::serialize(&meta).unwrap();
         p.write_page(0, &meta_bytes).unwrap();
         self.root_id = root_id;
+    }
+
+    /// Standard B-tree min keys: ceiling(max_keys / 2)
+    /// For order n (where max_keys = n-1): min_keys = ⌈(n-1)/2⌉ = ceiling(max_keys / 2)
+    pub fn calc_min_keys(&self) -> usize {
+        (self.max_keys + 1) / 2
     }
 
     pub fn get_node(&self, id: u32) -> Node {
@@ -168,7 +174,7 @@ impl BTree {
         
         let node = self.get_node(node.id);
         if let Some(parent_id) = node.parent {
-            let min_keys = self.max_keys / 2;
+            let min_keys = self.calc_min_keys();
             let len = match &node.node_type {
                 NodeType::Leaf(leaf) => leaf.keys.len(),
                 NodeType::Internal(internal) => internal.keys.len(),
@@ -200,7 +206,7 @@ impl BTree {
             _ => unreachable!(),
         };
         
-        let min_keys = self.max_keys / 2;
+        let min_keys = self.calc_min_keys();
         let is_leaf = self.get_node(child_id).is_leaf();
         
         if is_leaf {
