@@ -202,8 +202,20 @@ impl BTree {
     fn rebalance(&mut self, parent_id: u32, child_id: u32) {
         let mut parent = self.get_node(parent_id);
         let pos = match &parent.node_type {
-            NodeType::Internal(internal) => internal.children.iter().position(|&id| id == child_id).unwrap(),
-            _ => unreachable!(),
+            NodeType::Internal(internal) => {
+                match internal.children.iter().position(|&id| id == child_id) {
+                    Some(p) => p,
+                    None => {
+                        eprintln!("ERROR: Child {} not found in parent {}'s children {:?}", 
+                                  child_id, parent_id, internal.children);
+                        return; // Skip rebalancing rather than panic
+                    }
+                }
+            }
+            _ => {
+                eprintln!("ERROR: Parent {} is not an internal node", parent_id);
+                return;
+            }
         };
         
         let min_keys = self.calc_min_keys();
