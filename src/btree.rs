@@ -1,7 +1,50 @@
 use std::sync::{Arc, Mutex};
+use std::fs::OpenOptions;
+use std::io::Write;
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use crate::pager::Pager;
 use crate::node::{Node, NodeType, LeafNode, InternalNode};
+
+/// Simple file logger for debugging B-tree operations
+pub struct Logger;
+
+impl Logger {
+    fn log(msg: &str) {
+        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        let log_line = format!("[{}] {}\n", timestamp, msg);
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("btree_debug.log")
+        {
+            let _ = file.write_all(log_line.as_bytes());
+        }
+    }
+
+    pub fn info(msg: &str) {
+        Self::log(&format!("[INFO] {}", msg));
+    }
+
+    pub fn error(msg: &str) {
+        Self::log(&format!("[ERROR] {}", msg));
+    }
+
+    pub fn operation(op: &str, details: &str) {
+        Self::log(&format!("[OP:{}] {}", op, details));
+    }
+
+    pub fn node_state(node_id: u32, node_type: &str, keys: &[u64], children: &[u32], parent: Option<u32>) {
+        let parent_str = match parent {
+            Some(p) => format!("parent={}", p),
+            None => "parent=None".to_string(),
+        };
+        Self::log(&format!(
+            "[NODE:{}] type={} keys={:?} children={:?} {}",
+            node_id, node_type, keys, children, parent_str
+        ));
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MetaPage {
@@ -73,6 +116,11 @@ impl BTree {
     }
 
     pub fn save_node(&self, node: &Node) {
+        let (keys, children, parent, node_type) = match &node.node_type {
+            NodeType::Leaf(l) => (l.keys.clone(), vec![], node.parent, "Leaf"),
+            NodeType::Internal(i) => (i.keys.clone(), i.children.clone(), node.parent, "Internal"),
+        };
+        Logger::node_state(node.id, node_type, &keys, &children, parent);
         let mut p = self.pager.lock().unwrap();
         p.write_page(node.id, &node.serialize()).unwrap();
     }
@@ -85,6 +133,7 @@ impl BTree {
     }
 
     pub fn insert(&mut self, key: u64, value: String) {
+        Logger::operation("INSERT", &format!("key={} root_id={}", key, self.root_id));
         let root = self.get_node(self.root_id);
         self.insert_into_node(root, key, value);
     }
@@ -123,13 +172,15 @@ impl BTree {
     }
 
     pub fn delete(&mut self, key: u64) {
+        Logger::operation("DELETE", &format!("key={} root_id={}", key, self.root_id));
         let root = self.get_node(self.root_id);
         self.delete_from_node(root, key);
-        
+
         let mut root = self.get_node(self.root_id);
         match &root.node_type {
             NodeType::Internal(internal) => {
                 if internal.keys.is_empty() {
+                    Logger::operation("ROOT_SHRINK", &format!("old_root={} new_root={}", self.root_id, internal.children[0]));
                     self.root_id = internal.children[0];
                     let mut new_root = self.get_node(self.root_id);
                     new_root.parent = None;
@@ -180,6 +231,7 @@ impl BTree {
                 NodeType::Internal(internal) => internal.keys.len(),
             };
             if len < min_keys {
+                Logger::operation("UNDERFLOW", &format!("node={} len={} min_keys={} parent={}", node.id, len, min_keys, parent_id));
                 self.rebalance(parent_id, node.id);
             }
         }
@@ -200,37 +252,47 @@ impl BTree {
     }
 
     fn rebalance(&mut self, parent_id: u32, child_id: u32) {
+        Logger::operation("REBALANCE_START", &format!("parent={} child={}", parent_id, child_id));
         let mut parent = self.get_node(parent_id);
         let pos = match &parent.node_type {
             NodeType::Internal(internal) => {
                 match internal.children.iter().position(|&id| id == child_id) {
-                    Some(p) => p,
+                    Some(p) => {
+                        Logger::operation("REBALANCE_POS", &format!("child={} found at pos={} in parent={} children={:?}", child_id, p, parent_id, internal.children));
+                        p
+                    }
                     None => {
-                        eprintln!("ERROR: Child {} not found in parent {}'s children {:?}", 
-                                  child_id, parent_id, internal.children);
+                        let msg = format!("Child {} not found in parent {}'s children {:?}", child_id, parent_id, internal.children);
+                        Logger::error(&msg);
+                        eprintln!("ERROR: {}", msg);
                         return; // Skip rebalancing rather than panic
                     }
                 }
             }
             _ => {
-                eprintln!("ERROR: Parent {} is not an internal node", parent_id);
+                let msg = format!("Parent {} is not an internal node", parent_id);
+                Logger::error(&msg);
+                eprintln!("ERROR: {}", msg);
                 return;
             }
         };
-        
+
         let min_keys = self.calc_min_keys();
         let is_leaf = self.get_node(child_id).is_leaf();
-        
+        Logger::operation("REBALANCE_CHECK", &format!("min_keys={} is_leaf={} pos={}", min_keys, is_leaf, pos));
+
         if is_leaf {
             if pos > 0 {
                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
                 let mut left_sibling = self.get_node(p_internal.children[pos - 1]);
                 let l_len = match &left_sibling.node_type { NodeType::Leaf(l) => l.keys.len(), _ => unreachable!() };
+                Logger::operation("REBALANCE_TRY_BORROW_LEFT", &format!("child={} sibling={} sibling_keys={} min_keys={}", child_id, left_sibling.id, l_len, min_keys));
                 if l_len > min_keys {
                     let mut child = self.get_node(child_id);
                     if let (NodeType::Leaf(left_l), NodeType::Leaf(child_l)) = (&mut left_sibling.node_type, &mut child.node_type) {
                         let borrow_k = left_l.keys.pop().unwrap();
                         let borrow_v = left_l.values.pop().unwrap();
+                        Logger::operation("BORROW_LEFT", &format!("child={} borrowed key={} from sibling={}", child_id, borrow_k, left_sibling.id));
                         child_l.keys.insert(0, borrow_k);
                         child_l.values.insert(0, borrow_v);
                         p_internal.keys[pos - 1] = borrow_k;
@@ -245,11 +307,13 @@ impl BTree {
                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
                 let mut right_sibling = self.get_node(p_internal.children[pos + 1]);
                 let r_len = match &right_sibling.node_type { NodeType::Leaf(l) => l.keys.len(), _ => unreachable!() };
+                Logger::operation("REBALANCE_TRY_BORROW_RIGHT", &format!("child={} sibling={} sibling_keys={} min_keys={}", child_id, right_sibling.id, r_len, min_keys));
                 if r_len > min_keys {
                     let mut child = self.get_node(child_id);
                     if let (NodeType::Leaf(right_l), NodeType::Leaf(child_l)) = (&mut right_sibling.node_type, &mut child.node_type) {
                         let borrow_k = right_l.keys.remove(0);
                         let borrow_v = right_l.values.remove(0);
+                        Logger::operation("BORROW_RIGHT", &format!("child={} borrowed key={} from sibling={}", child_id, borrow_k, right_sibling.id));
                         child_l.keys.push(borrow_k);
                         child_l.values.push(borrow_v);
                         p_internal.keys[pos] = right_l.keys[0];
@@ -264,6 +328,7 @@ impl BTree {
                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
                 let mut left_sibling = self.get_node(p_internal.children[pos - 1]);
                 let mut child = self.get_node(child_id);
+                Logger::operation("MERGE_LEFT", &format!("child={} merged into sibling={} parent={}", child_id, left_sibling.id, parent_id));
                 p_internal.keys.remove(pos - 1);
                 p_internal.children.remove(pos);
                 if let (NodeType::Leaf(left_l), NodeType::Leaf(child_l)) = (&mut left_sibling.node_type, &mut child.node_type) {
@@ -275,6 +340,7 @@ impl BTree {
                 self.save_node(&parent);
                 if let Some(gp_id) = parent.parent {
                     if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
+                        Logger::operation("REBALANCE_RECURSIVE", &format!("parent={} underflow, rebalancing with grandparent={}", parent_id, gp_id));
                         self.rebalance(gp_id, parent.id);
                     }
                 }
@@ -282,6 +348,7 @@ impl BTree {
                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
                 let mut right_sibling = self.get_node(p_internal.children[pos + 1]);
                 let mut child = self.get_node(child_id);
+                Logger::operation("MERGE_RIGHT", &format!("sibling={} merged into child={} parent={}", right_sibling.id, child_id, parent_id));
                 p_internal.keys.remove(pos);
                 p_internal.children.remove(pos + 1);
                 if let (NodeType::Leaf(child_l), NodeType::Leaf(right_l)) = (&mut child.node_type, &mut right_sibling.node_type) {
@@ -293,25 +360,30 @@ impl BTree {
                 self.save_node(&parent);
                 if let Some(gp_id) = parent.parent {
                     if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
+                        Logger::operation("REBALANCE_RECURSIVE", &format!("parent={} underflow, rebalancing with grandparent={}", parent_id, gp_id));
                         self.rebalance(gp_id, parent.id);
                     }
                 }
             }
         } else {
+            // Internal node rebalancing
+            Logger::operation("REBALANCE_INTERNAL", &format!("child={} is internal node", child_id));
             if pos > 0 {
                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
                 let mut left_sibling = self.get_node(p_internal.children[pos - 1]);
                 let l_len = match &left_sibling.node_type { NodeType::Internal(i) => i.keys.len(), _ => unreachable!() };
+                Logger::operation("REBALANCE_TRY_BORROW_LEFT_INT", &format!("child={} sibling={} sibling_keys={} min_keys={}", child_id, left_sibling.id, l_len, min_keys));
                 if l_len > min_keys {
                     let mut child = self.get_node(child_id);
                     if let (NodeType::Internal(left_i), NodeType::Internal(child_i)) = (&mut left_sibling.node_type, &mut child.node_type) {
                         let borrow_k = left_i.keys.pop().unwrap();
                         let borrow_c = left_i.children.pop().unwrap();
                         let parent_k = p_internal.keys[pos - 1];
+                        Logger::operation("BORROW_LEFT_INT", &format!("child={} borrowed key={} child={} from sibling={}", child_id, borrow_k, borrow_c, left_sibling.id));
                         p_internal.keys[pos - 1] = borrow_k;
                         child_i.keys.insert(0, parent_k);
                         child_i.children.insert(0, borrow_c);
-                        
+
                         let mut bc_node = self.get_node(borrow_c);
                         bc_node.parent = Some(child.id);
                         self.save_node(&bc_node);
@@ -326,16 +398,18 @@ impl BTree {
                 let mut p_internal = match &mut parent.node_type { NodeType::Internal(i) => i, _ => unreachable!() };
                 let mut right_sibling = self.get_node(p_internal.children[pos + 1]);
                 let r_len = match &right_sibling.node_type { NodeType::Internal(i) => i.keys.len(), _ => unreachable!() };
+                Logger::operation("REBALANCE_TRY_BORROW_RIGHT_INT", &format!("child={} sibling={} sibling_keys={} min_keys={}", child_id, right_sibling.id, r_len, min_keys));
                 if r_len > min_keys {
                     let mut child = self.get_node(child_id);
                     if let (NodeType::Internal(right_i), NodeType::Internal(child_i)) = (&mut right_sibling.node_type, &mut child.node_type) {
                         let borrow_k = right_i.keys.remove(0);
                         let borrow_c = right_i.children.remove(0);
                         let parent_k = p_internal.keys[pos];
+                        Logger::operation("BORROW_RIGHT_INT", &format!("child={} borrowed key={} child={} from sibling={}", child_id, borrow_k, borrow_c, right_sibling.id));
                         p_internal.keys[pos] = borrow_k;
                         child_i.keys.push(parent_k);
                         child_i.children.push(borrow_c);
-                        
+
                         let mut bc_node = self.get_node(borrow_c);
                         bc_node.parent = Some(child.id);
                         self.save_node(&bc_node);
@@ -352,6 +426,7 @@ impl BTree {
                 let mut child = self.get_node(child_id);
                 let parent_k = p_internal.keys.remove(pos - 1);
                 p_internal.children.remove(pos);
+                Logger::operation("MERGE_LEFT_INT", &format!("child={} merged into sibling={} parent={} parent_key={}", child_id, left_sibling.id, parent_id, parent_k));
                 if let (NodeType::Internal(left_i), NodeType::Internal(child_i)) = (&mut left_sibling.node_type, &mut child.node_type) {
                     left_i.keys.push(parent_k);
                     left_i.keys.append(&mut child_i.keys);
@@ -366,6 +441,7 @@ impl BTree {
                 self.save_node(&parent);
                 if let Some(gp_id) = parent.parent {
                     if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
+                        Logger::operation("REBALANCE_RECURSIVE", &format!("parent={} underflow after merge, rebalancing with grandparent={}", parent_id, gp_id));
                         self.rebalance(gp_id, parent.id);
                     }
                 }
@@ -375,6 +451,7 @@ impl BTree {
                 let mut child = self.get_node(child_id);
                 let parent_k = p_internal.keys.remove(pos);
                 p_internal.children.remove(pos + 1);
+                Logger::operation("MERGE_RIGHT_INT", &format!("sibling={} merged into child={} parent={} parent_key={}", right_sibling.id, child_id, parent_id, parent_k));
                 if let (NodeType::Internal(child_i), NodeType::Internal(right_i)) = (&mut child.node_type, &mut right_sibling.node_type) {
                     child_i.keys.push(parent_k);
                     child_i.keys.append(&mut right_i.keys);
@@ -389,6 +466,7 @@ impl BTree {
                 self.save_node(&parent);
                 if let Some(gp_id) = parent.parent {
                     if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
+                        Logger::operation("REBALANCE_RECURSIVE", &format!("parent={} underflow after merge, rebalancing with grandparent={}", parent_id, gp_id));
                         self.rebalance(gp_id, parent.id);
                     }
                 }
@@ -398,6 +476,7 @@ impl BTree {
 
     fn split_node(&mut self, mut node: Node) {
         let new_id = self.pager.lock().unwrap().allocate_page();
+        Logger::operation("SPLIT", &format!("node={} new_id={}", node.id, new_id));
         let mut sibling = match &mut node.node_type {
             NodeType::Leaf(leaf) => {
                 let split_at = leaf.keys.len() / 2;
@@ -461,33 +540,35 @@ impl BTree {
 
         if let Some(parent_id) = node.parent {
             let mut parent = self.get_node(parent_id);
-            
+            Logger::operation("SPLIT_COMPLETE", &format!("node={} sibling={} parent={} up_key={}", node.id, sibling.id, parent_id, up_key));
+
             if let NodeType::Internal(p_internal) = &mut parent.node_type {
                 let pos = p_internal.keys.binary_search(&up_key).unwrap_or_else(|e| e);
                 p_internal.keys.insert(pos, up_key);
                 p_internal.children.insert(pos + 1, sibling.id);
             }
             self.save_node(&parent);
-            
+
             if parent.is_overflowing(self.max_keys) {
                 self.split_node(parent);
             }
         } else {
             // Root split
             let new_root_id = self.pager.lock().unwrap().allocate_page();
+            Logger::operation("ROOT_SPLIT", &format!("old_root={} new_root={} node={} sibling={} up_key={}", node.id, new_root_id, node.id, sibling.id, up_key));
             let mut new_root = Node::new_internal(new_root_id);
-            
+
             if let NodeType::Internal(r_internal) = &mut new_root.node_type {
                 r_internal.keys.push(up_key);
                 r_internal.children.push(node.id);
                 r_internal.children.push(sibling.id);
             }
-            
+
             self.root_id = new_root_id;
-            
+
             node.parent = Some(new_root_id);
             sibling.parent = Some(new_root_id);
-            
+
             self.save_node(&node);
             self.save_node(&sibling);
             self.save_node(&new_root);
