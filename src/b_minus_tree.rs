@@ -33,30 +33,31 @@ impl BMinusTree {
         }
 
         let meta_bytes = p.read_page(0).unwrap();
-        // Strip trailing zeros from the page buffer before deserializing
-        let actual_len = meta_bytes.iter().rposition(|&b| b != 0).map(|i| i + 1).unwrap_or(0);
 
-        // If meta page is empty/corrupted, treat as fresh database
-        if actual_len == 0 {
-            let root_id = p.allocate_page();
-            let root = BNode::new(root_id);
-            p.write_page(root_id, &root.serialize()).unwrap();
+        // Deserialize directly from the full page buffer.
+        // bincode reads only as many bytes as the type needs and ignores the rest.
+        // A zeroed page gives root_id == 0, which we detect as empty/corrupt.
+        match bincode::deserialize::<BMinusMetaPage>(&meta_bytes) {
+            Ok(meta) if meta.root_id > 0 => {
+                let root_id = meta.root_id;
+                let db_max_keys = meta.max_keys;
+                drop(p);
+                Self { pager, root_id, max_keys: db_max_keys }
+            }
+            _ => {
+                // Meta page is zeroed or corrupt – reinitialise.
+                let root_id = p.allocate_page();
+                let root = BNode::new(root_id);
+                p.write_page(root_id, &root.serialize()).unwrap();
 
-            // Write meta page
-            let meta = BMinusMetaPage { root_id, max_keys };
-            let meta_bytes = bincode::serialize(&meta).unwrap();
-            p.write_page(0, &meta_bytes).unwrap();
+                let meta = BMinusMetaPage { root_id, max_keys };
+                let meta_bytes = bincode::serialize(&meta).unwrap();
+                p.write_page(0, &meta_bytes).unwrap();
 
-            drop(p);
-            return Self { pager, root_id, max_keys };
+                drop(p);
+                Self { pager, root_id, max_keys }
+            }
         }
-
-        let meta: BMinusMetaPage = bincode::deserialize(&meta_bytes[..actual_len]).unwrap();
-        let root_id = meta.root_id;
-        let db_max_keys = meta.max_keys;
-        drop(p);
-
-        Self { pager, root_id, max_keys: db_max_keys }
     }
 
     pub fn reset(&mut self, max_keys: usize) {
@@ -74,10 +75,14 @@ impl BMinusTree {
         self.root_id = root_id;
     }
 
-    /// Standard B-tree min keys: ceiling(max_keys / 2)
-    /// For order n (where max_keys = n-1): min_keys = ⌈(n-1)/2⌉ = ceiling(max_keys / 2)
-    pub fn calc_min_keys(&self) -> usize {
+    pub fn min_leaf_keys(&self) -> usize {
         (self.max_keys + 1) / 2
+    }
+
+    pub fn min_internal_keys(&self) -> usize {
+        let m = self.max_keys + 1;
+        let min_children = (m + 1) / 2;
+        min_children - 1
     }
 
     pub fn get_node(&self, id: u32) -> BNode {
@@ -184,7 +189,7 @@ impl BMinusTree {
         
         let node = self.get_node(node.id);
         if let Some(parent_id) = node.parent {
-            let min_keys = self.calc_min_keys();
+            let min_keys = if node.is_leaf() { self.min_leaf_keys() } else { self.min_internal_keys() };
             if node.keys.len() < min_keys {
                 self.rebalance(parent_id, node.id);
             }
@@ -194,8 +199,8 @@ impl BMinusTree {
     fn rebalance(&mut self, parent_id: u32, child_id: u32) {
         let mut parent = self.get_node(parent_id);
         let pos = parent.children.iter().position(|&id| id == child_id).unwrap();
-        
-        let min_keys = self.calc_min_keys();
+        let is_leaf = self.get_node(child_id).is_leaf();
+        let min_keys = if is_leaf { self.min_leaf_keys() } else { self.min_internal_keys() };
         
         // Try borrow left
         if pos > 0 {
@@ -289,7 +294,7 @@ impl BMinusTree {
             self.save_node(&parent);
             
             if let Some(gp_id) = parent.parent {
-                if parent.keys.len() < min_keys {
+                if parent.keys.len() < self.min_internal_keys() {
                     self.rebalance(gp_id, parent.id);
                 }
             }
@@ -320,7 +325,7 @@ impl BMinusTree {
             self.save_node(&parent);
             
             if let Some(gp_id) = parent.parent {
-                if parent.keys.len() < min_keys {
+                if parent.keys.len() < self.min_internal_keys() {
                     self.rebalance(gp_id, parent.id);
                 }
             }

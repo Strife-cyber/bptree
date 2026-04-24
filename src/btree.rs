@@ -79,30 +79,31 @@ impl BTree {
         }
 
         let meta_bytes = p.read_page(0).unwrap();
-        // Strip trailing zeros from the page buffer before deserializing
-        let actual_len = meta_bytes.iter().rposition(|&b| b != 0).map(|i| i + 1).unwrap_or(0);
 
-        // If meta page is empty/corrupted, treat as fresh database
-        if actual_len == 0 {
-            let root_id = p.allocate_page();
-            let root = Node::new_leaf(root_id);
-            p.write_page(root_id, &root.serialize()).unwrap();
+        // Deserialize directly from the full page buffer.
+        // bincode reads only as many bytes as the type needs and ignores the rest.
+        // A zeroed page (fresh DB somehow reached here) gives root_id == 0, which we detect below.
+        match bincode::deserialize::<MetaPage>(&meta_bytes) {
+            Ok(meta) if meta.root_id > 0 => {
+                let root_id = meta.root_id;
+                let db_max_keys = meta.max_keys;
+                drop(p);
+                Self { pager, root_id, max_keys: db_max_keys }
+            }
+            _ => {
+                // Meta page is zeroed or corrupt – reinitialise.
+                let root_id = p.allocate_page();
+                let root = Node::new_leaf(root_id);
+                p.write_page(root_id, &root.serialize()).unwrap();
 
-            // Write meta page
-            let meta = MetaPage { root_id, max_keys };
-            let meta_bytes = bincode::serialize(&meta).unwrap();
-            p.write_page(0, &meta_bytes).unwrap();
+                let meta = MetaPage { root_id, max_keys };
+                let meta_bytes = bincode::serialize(&meta).unwrap();
+                p.write_page(0, &meta_bytes).unwrap();
 
-            drop(p);
-            return Self { pager, root_id, max_keys };
+                drop(p);
+                Self { pager, root_id, max_keys }
+            }
         }
-
-        let meta: MetaPage = bincode::deserialize(&meta_bytes[..actual_len]).unwrap();
-        let root_id = meta.root_id;
-        let db_max_keys = meta.max_keys;
-        drop(p);
-
-        Self { pager, root_id, max_keys: db_max_keys }
     }
 
     pub fn reset(&mut self, max_keys: usize) {
@@ -120,10 +121,14 @@ impl BTree {
         self.root_id = root_id;
     }
 
-    /// Standard B-tree min keys: ceiling(max_keys / 2)
-    /// For order n (where max_keys = n-1): min_keys = ⌈(n-1)/2⌉ = ceiling(max_keys / 2)
-    pub fn calc_min_keys(&self) -> usize {
+    pub fn min_leaf_keys(&self) -> usize {
         (self.max_keys + 1) / 2
+    }
+
+    pub fn min_internal_keys(&self) -> usize {
+        let m = self.max_keys + 1;
+        let min_children = (m + 1) / 2;
+        min_children - 1
     }
 
     pub fn get_node(&self, id: u32) -> Node {
@@ -242,10 +247,9 @@ impl BTree {
         
         let node = self.get_node(node.id);
         if let Some(parent_id) = node.parent {
-            let min_keys = self.calc_min_keys();
-            let len = match &node.node_type {
-                NodeType::Leaf(leaf) => leaf.keys.len(),
-                NodeType::Internal(internal) => internal.keys.len(),
+            let (len, min_keys) = match &node.node_type {
+                NodeType::Leaf(leaf) => (leaf.keys.len(), self.min_leaf_keys()),
+                NodeType::Internal(internal) => (internal.keys.len(), self.min_internal_keys()),
             };
             if len < min_keys {
                 Logger::operation("UNDERFLOW", &format!("node={} len={} min_keys={} parent={}", node.id, len, min_keys, parent_id));
@@ -294,8 +298,8 @@ impl BTree {
             }
         };
 
-        let min_keys = self.calc_min_keys();
         let is_leaf = self.get_node(child_id).is_leaf();
+        let min_keys = if is_leaf { self.min_leaf_keys() } else { self.min_internal_keys() };
         Logger::operation("REBALANCE_CHECK", &format!("min_keys={} is_leaf={} pos={}", min_keys, is_leaf, pos));
 
         if is_leaf {
@@ -361,7 +365,7 @@ impl BTree {
                     self.split_node(left_sibling);
                 }
                 if let Some(gp_id) = parent.parent {
-                    if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
+                    if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < self.min_internal_keys(), _ => false } {
                         Logger::operation("REBALANCE_RECURSIVE", &format!("parent={} underflow, rebalancing with grandparent={}", parent_id, gp_id));
                         self.rebalance(gp_id, parent.id);
                     }
@@ -386,7 +390,7 @@ impl BTree {
                     self.split_node(child);
                 }
                 if let Some(gp_id) = parent.parent {
-                    if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
+                    if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < self.min_internal_keys(), _ => false } {
                         Logger::operation("REBALANCE_RECURSIVE", &format!("parent={} underflow, rebalancing with grandparent={}", parent_id, gp_id));
                         self.rebalance(gp_id, parent.id);
                     }
@@ -472,7 +476,7 @@ impl BTree {
                     self.split_node(left_sibling);
                 }
                 if let Some(gp_id) = parent.parent {
-                    if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
+                    if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < self.min_internal_keys(), _ => false } {
                         Logger::operation("REBALANCE_RECURSIVE", &format!("parent={} underflow after merge, rebalancing with grandparent={}", parent_id, gp_id));
                         self.rebalance(gp_id, parent.id);
                     }
@@ -502,7 +506,7 @@ impl BTree {
                     self.split_node(child);
                 }
                 if let Some(gp_id) = parent.parent {
-                    if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < min_keys, _ => false } {
+                    if match &parent.node_type { NodeType::Internal(i) => i.keys.len() < self.min_internal_keys(), _ => false } {
                         Logger::operation("REBALANCE_RECURSIVE", &format!("parent={} underflow after merge, rebalancing with grandparent={}", parent_id, gp_id));
                         self.rebalance(gp_id, parent.id);
                     }
